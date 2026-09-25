@@ -1,11 +1,21 @@
 import { z } from 'zod';
 
+const variantPromptsSchema = z.array(z.string().trim().min(1).max(4_000)).min(2).max(3)
+  .refine(values => new Set(values.map(value => value.toLocaleLowerCase())).size === values.length, 'Variant prompts must be unique.');
+
+function validateVariantPrompts(value: { headlines: string[]; variantPrompts?: string[] }, ctx: z.RefinementCtx): void {
+  if (value.variantPrompts && value.variantPrompts.length !== value.headlines.length) {
+    ctx.addIssue({ code: 'custom', path: ['variantPrompts'], message: 'Provide one prompt per headline.' });
+  }
+}
+
 export const creativeImageRequestSchema = z.object({
   requestId: z.string().uuid(),
   headlines: z.array(z.string().trim().min(1).max(120)).min(2).max(3)
     .refine(values => new Set(values.map(value => value.toLocaleLowerCase())).size === values.length, 'Headlines must be unique.'),
   imagePrompt: z.string().trim().min(1).max(4_000),
-}).strict();
+  variantPrompts: variantPromptsSchema.optional(),
+}).strict().superRefine(validateVariantPrompts);
 
 export type CreativeImageRequest = z.infer<typeof creativeImageRequestSchema>;
 
@@ -28,11 +38,27 @@ export const creativeVideoRequestSchema = z.object({
   headlines: creativeImageRequestSchema.shape.headlines,
   imagePrompt: z.string().trim().min(1).max(4_000),
   videoOptions: creativeVideoOptionsSchema.default({ durationSeconds: 5, resolution: 'hd', aspectRatio: '1:1', generateAudio: false, draft: true }),
-}).strict();
+  variantPrompts: variantPromptsSchema.optional(),
+}).strict().superRefine(validateVariantPrompts);
 
 export type CreativeVideoRequest = z.infer<typeof creativeVideoRequestSchema>;
 
 export type CreativeImageJobStatus = 'submitting' | 'generating' | 'ready' | 'failed' | 'uncertain';
+export type CreativeVariantOutputStatus = 'queued' | 'submitting' | 'generating' | 'ready' | 'failed' | 'uncertain' | 'skipped';
+
+export interface CreativeVariantOutput {
+  id: string;
+  index: number;
+  headline: string;
+  imagePrompt: string;
+  status: CreativeVariantOutputStatus;
+  imageUrl: string | null;
+  videoUrl: string | null;
+  error: string | null;
+  providerTaskId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 
 export interface CreativeImageJob {
   id: string;
@@ -48,4 +74,6 @@ export interface CreativeImageJob {
   providerTaskId: string | null;
   createdAt: string;
   updatedAt: string;
+  outputs?: CreativeVariantOutput[];
+  visualMode?: 'shared' | 'distinct';
 }

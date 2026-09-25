@@ -55,12 +55,16 @@ const emptyDraft: CustomPersonaInput = {
 export default function PersonaWave({
   campaign,
   headlines,
+  creativeJobId,
+  onClearCreative,
   wave,
   onWave,
   onCampaign,
 }: {
   campaign: Campaign;
   headlines: string[];
+  creativeJobId: string | null;
+  onClearCreative: () => void;
   wave: WaveSnapshot | null;
   onWave: (wave: WaveSnapshot) => void;
   onCampaign: (campaign: Campaign) => void;
@@ -89,6 +93,8 @@ export default function PersonaWave({
   });
   const selectedIds = profileMix.length ? profileMix : catalog.map((persona) => persona.id);
   const selectedCount = selectedIds.length;
+  const validHeadlines = headlines.length >= 2 && headlines.length <= 3 && headlines.every((line) => line.trim().length > 0 && line.trim().length <= 120) &&
+    new Set(headlines.map((line) => line.trim().toLocaleLowerCase())).size === headlines.length;
 
   useEffect(() => {
     if (wave?.agentCount) setAgentCount(wave.agentCount);
@@ -101,6 +107,7 @@ export default function PersonaWave({
     try {
       const result = await postJson<{ wave: WaveSnapshot }>(`/api/campaigns/${encodeURIComponent(campaign.id)}/run`, {
         agentCount, concurrency, headlines: headlines.filter((line) => line.trim()),
+        ...(creativeJobId ? { creativeJobId } : {}),
         ...(profileMix.length && profileMix.length < catalog.length ? { profileMix } : {}),
       });
       onWave(result.wave);
@@ -178,12 +185,12 @@ export default function PersonaWave({
   }
 
   return (
-    <section className="wave-panel" aria-labelledby="wave-title">
+    <section className="wave-panel" id="experiment-setup" aria-labelledby="wave-title">
       <div className="wave-heading">
         <div>
           <span className="section-kicker">PERSONA EXPERIMENT</span>
-          <h2 id="wave-title">Configure judges and run a wave</h2>
-          <p>Filter the catalog, add a custom profile, then send Liquid headlines to those personas. The campaign stays a draft.</p>
+          <h2 id="wave-title">Experiment setup</h2>
+          <p>Choose audience profiles and run a simulation.</p>
         </div>
         <span className={`status-pill ${runtime === 'running' ? 'wave-running' : ''}`}>
           <span className="status-dot" /> {runtime === 'running' ? 'Wave running' : runtime === 'paused' ? 'Wave paused' : 'Draft idle'}
@@ -203,15 +210,20 @@ export default function PersonaWave({
         </label>
         <div className="wave-actions">
           {runtime === 'running'
-            ? <button className="button button-secondary" type="button" onClick={() => void pause()} disabled={busy}><Pause size={15} /> Pause</button>
+            ? <button className="button button-secondary" type="button" onClick={() => void pause()} disabled={busy} aria-busy={busy}><Pause size={15} /> Pause</button>
             : runtime === 'paused'
-              ? <button className="button button-primary" type="button" onClick={() => void resume()} disabled={busy}><Play size={15} /> Resume</button>
-              : <button className="button button-primary" type="button" onClick={() => void start()} disabled={busy || headlines.filter((line) => line.trim()).length < 2}>
+              ? <button className="button button-primary" type="button" onClick={() => void resume()} disabled={busy} aria-busy={busy}><Play size={15} /> Resume</button>
+              : <button className="button button-primary" type="button" onClick={() => void start()} disabled={busy || !validHeadlines} aria-busy={busy}>
                 {busy ? <LoaderCircle size={15} className="spin" /> : <Users size={15} />} Start wave
               </button>}
         </div>
       </div>
-      <p className="wave-headlines">{headlines.filter(Boolean).length ? `Judging: ${headlines.filter(Boolean).join(' · ')}` : 'Suggest or enter at least two headlines on the campaign page before starting.'}</p>
+      <p className="wave-headlines">{validHeadlines ? `Judging: ${headlines.join(' · ')}` : 'Add 2–3 unique, non-empty headlines in Campaign before starting.'}</p>
+      <div className="wave-visual-note" role="status">
+        {creativeJobId
+          ? <>Saved creative attached. This simulation evaluates headline copy only; it does not inspect the image or video. <button type="button" className="text-button" onClick={onClearCreative}>Remove creative</button></>
+          : 'This simulation evaluates headline copy only; it does not inspect images or videos. Select a ready creative in Campaign to attach one.'}
+      </div>
 
       <div className="persona-filters">
         <label className="composer-field"><span><b>Age</b></span>

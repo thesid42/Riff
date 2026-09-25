@@ -7,6 +7,7 @@ import type {
   Campaign, Experiment, IntegrationStatus, Lesson, MetricsSnapshot, Variant,
 } from '../shared/types.js';
 import type { WaveSnapshot } from '../shared/run.js';
+import type { CreativeImageJob } from '../shared/creative.js';
 import CreativeComposer from './CreativeComposer.js';
 import PersonaWave from './PersonaWave.js';
 
@@ -19,6 +20,17 @@ interface CampaignDetails {
   experiments: Experiment[];
   lessons: Lesson[];
   wave?: WaveSnapshot;
+}
+
+interface SelectedCreative {
+  campaignId: string;
+  jobId: string;
+  headlines: string[];
+}
+
+function validHeadlineDraft(headlines: string[] | undefined): headlines is string[] {
+  return Boolean(headlines && headlines.length >= 2 && headlines.length <= 3 && headlines.every((line) => line.trim().length > 0 && line.trim().length <= 120) &&
+    new Set(headlines.map((line) => line.trim().toLocaleLowerCase())).size === headlines.length);
 }
 
 interface ApiError extends Error {
@@ -102,10 +114,26 @@ export default function App() {
   const [drawer, setDrawer] = useState<Drawer>(null);
   const [saveError, setSaveError] = useState('');
   const [saving, setSaving] = useState(false);
-  const [composerHeadlines, setComposerHeadlines] = useState<string[]>([]);
+  const [composerDrafts, setComposerDrafts] = useState<Record<string, string[]>>({});
+  const [selectedCreative, setSelectedCreative] = useState<SelectedCreative | null>(null);
 
   const currentCampaign = campaigns.find((campaign) => campaign.id === selectedId) ?? null;
   const activeCampaign = details?.campaign.id === selectedId ? details.campaign : currentCampaign;
+  const hasComposerDraft = Object.prototype.hasOwnProperty.call(composerDrafts, selectedId);
+  const matchingDetails = details?.campaign.id === selectedId ? details : null;
+  const composerHeadlines = hasComposerDraft
+    ? composerDrafts[selectedId]!
+    : validHeadlineDraft(activeCampaign?.headlines) ? activeCampaign.headlines :
+      validHeadlineDraft(matchingDetails?.wave?.headlines) ? matchingDetails.wave.headlines : [];
+  const currentCreativeSelection = selectedCreative?.campaignId === selectedId &&
+    JSON.stringify(selectedCreative.headlines) === JSON.stringify(composerHeadlines) ? selectedCreative : null;
+
+  function updateComposerHeadlines(campaignId: string, headlines: string[]) {
+    setComposerDrafts((current) => ({ ...current, [campaignId]: headlines }));
+    setSelectedCreative((current) => current && current.campaignId === campaignId && JSON.stringify(current.headlines) !== JSON.stringify(headlines) ? null : current);
+  }
+
+  useEffect(() => { setSelectedCreative(null); }, [selectedId]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -283,6 +311,10 @@ export default function App() {
                     {campaigns.length > 0 && <div className="campaign-meta"><span className="status-pill"><span className="status-dot" /> {details?.wave?.runtime === 'running' ? 'Draft · wave running' : details?.wave?.runtime === 'paused' ? 'Draft · wave paused' : 'Draft'}</span><span>{activeCampaign?.product ?? 'Campaign brief'}</span></div>}
                   </div>
                   <div className="heading-actions">
+                    {activeCampaign && <button type="button" className="button button-secondary" onClick={() => {
+                      setView('Experiments');
+                      window.requestAnimationFrame(() => document.getElementById('experiment-setup')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }));
+                    }}><FlaskConical size={16} /> Experiment setup</button>}
                     <button type="button" className="button button-secondary" onClick={() => setDrawer('setup')}><Settings2 size={16} /> Setup</button>
                     <button type="button" className="button button-primary" disabled={listLoading || Boolean(listError && campaigns.length === 0)} onClick={() => { setSaveError(''); setDialogOpen(true); }}><Plus size={17} /> Create campaign</button>
                   </div>
@@ -308,15 +340,25 @@ export default function App() {
                 onShowMetrics={() => setDrawer('metrics')}
                 onCreate={() => { setSaveError(''); setDialogOpen(true); }}
                 onRetryList={() => setListRetry((count) => count + 1)}
-                composerHeadlines={composerHeadlines.length ? composerHeadlines : (details?.campaign.headlines ?? activeCampaign?.headlines ?? [])}
-                onHeadlinesChange={setComposerHeadlines}
+                composerHeadlines={composerHeadlines}
+                initialHeadlines={hasComposerDraft || validHeadlineDraft(composerHeadlines) ? composerHeadlines : undefined}
+                onHeadlinesChange={(headlines) => activeCampaign && updateComposerHeadlines(activeCampaign.id, headlines)}
+                selectedCreativeJobId={currentCreativeSelection?.jobId ?? null}
+                onUseForExperiment={(job, headlines) => {
+                  if (!activeCampaign) return;
+                  setSelectedCreative({ campaignId: activeCampaign.id, jobId: job.id, headlines: [...headlines] });
+                  setView('Experiments');
+                  window.requestAnimationFrame(() => document.getElementById('experiment-setup')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }));
+                }}
               />
             )}
             {view === 'Experiments' && (
               <ExperimentsView
                 campaign={activeCampaign}
                 details={details?.campaign.id === selectedId ? details : null}
-                headlines={composerHeadlines.length ? composerHeadlines : (details?.campaign.headlines ?? activeCampaign?.headlines ?? [])}
+                headlines={currentCreativeSelection?.headlines ?? composerHeadlines}
+                creativeJobId={currentCreativeSelection?.jobId ?? null}
+                onClearCreative={() => setSelectedCreative(null)}
                 loading={detailsLoading}
                 error={detailsError}
                 onRetry={retryCampaign}
@@ -359,7 +401,7 @@ function LoadingState({ label }: { label: string }) {
 
 function CampaignDashboard({
   campaign, details, metrics, listLoading, listError, detailsLoading, metricsLoading, detailsError, metricsError, onRetry, onShowMetrics, onCreate, onRetryList,
-  composerHeadlines, onHeadlinesChange,
+  composerHeadlines, initialHeadlines, onHeadlinesChange, selectedCreativeJobId, onUseForExperiment,
 }: {
   campaign: Campaign | null;
   details: CampaignDetails | null;
@@ -375,7 +417,10 @@ function CampaignDashboard({
   onCreate: () => void;
   onRetryList: () => void;
   composerHeadlines: string[];
+  initialHeadlines?: string[];
   onHeadlinesChange: (headlines: string[]) => void;
+  selectedCreativeJobId: string | null;
+  onUseForExperiment: (job: CreativeImageJob, headlines: string[]) => void;
 }) {
   const totals = metrics?.totals;
   const spend = totals ? money(totals.spendCents) : '—';
@@ -423,7 +468,7 @@ function CampaignDashboard({
         </section>
       </div>
 
-      {campaign && <CreativeComposer campaign={campaign} onHeadlinesChange={onHeadlinesChange} />}
+      {campaign && <CreativeComposer campaign={campaign} initialHeadlines={initialHeadlines} onHeadlinesChange={onHeadlinesChange} selectedCreativeJobId={selectedCreativeJobId} onUseForExperiment={onUseForExperiment} />}
 
       <section className="creative-section" aria-labelledby="creative-title">
         <div className="creative-heading">
@@ -514,11 +559,13 @@ function CreativeCard({ variant, metrics }: { variant: Variant; metrics: Metrics
 }
 
 function ExperimentsView({
-  campaign, details, headlines, loading, error, onRetry, onWave, onCampaign,
+  campaign, details, headlines, creativeJobId, onClearCreative, loading, error, onRetry, onWave, onCampaign,
 }: {
   campaign: Campaign | null;
   details: CampaignDetails | null;
   headlines: string[];
+  creativeJobId: string | null;
+  onClearCreative: () => void;
   loading: boolean;
   error: string;
   onRetry: () => void;
@@ -528,7 +575,7 @@ function ExperimentsView({
   return (
     <div className="dashboard-stack">
       {campaign ? (
-        <PersonaWave campaign={campaign} headlines={headlines} wave={details?.wave ?? null} onWave={onWave} onCampaign={onCampaign} />
+        <PersonaWave campaign={campaign} headlines={headlines} creativeJobId={creativeJobId} onClearCreative={onClearCreative} wave={details?.wave ?? null} onWave={onWave} onCampaign={onCampaign} />
       ) : (
         <div className="empty-records"><span className="empty-record-icon"><FlaskConical size={20} /></span><h3>Choose a campaign to begin</h3><p>Save a campaign draft and configure persona judges here when you are ready to run a wave.</p></div>
       )}

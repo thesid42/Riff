@@ -1,6 +1,6 @@
 # Riff
 
-Riff is a local campaign experiment workspace. It saves campaign briefs and presents campaign results when the API has real data. A campaign’s creative composer can request editable Liquid headline suggestions and, only after an explicit user action, create paid BFL image or video drafts. It does not simulate traffic or start campaigns.
+Riff is a local campaign experiment workspace. It saves campaign briefs, creates reviewable image or video drafts, and runs simulated audience experiments when requested. Liquid suggests headlines and judges them as audience personas; Black Forest Labs generates the visuals. Riff does not publish ads or buy real traffic.
 
 Riff is intended for local, single-user use. The server binds to loopback and has no authentication for public hosting.
 
@@ -14,13 +14,19 @@ Implemented:
 
 - Results-first dashboard with campaign selection, metric details, experiments, lessons, and provider configuration status.
 - Campaign drafts persisted in SQLite. Saving a draft does not start traffic or creative generation.
-- Creative composer with editable Liquid headline suggestions, manual-copy fallback, and explicit paid BFL image generation. Generated images and their shared headline variants are saved as reviewable drafts.
+- Creative composer with editable Liquid headline suggestions, manual-copy fallback, and a separate visual direction for each of 2–3 versions. Generating a batch makes one paid BFL request per version, sequentially. Existing drafts that share one asset remain available. The Versions editor and saved drafts start collapsed; default image directions share a professional studio art direction with distinct framing per version.
 - Video generation is enabled with `BFL_VIDEO_ENABLED=true`. Controls include duration, aspect ratio, HD/Full HD resolution, audio, and draft quality; draft quality requires HD. It is disabled by default.
 - Each saved variant has a **View image** or **Watch video** action. The focused viewer shows the complete image or a video with playback controls; **Open original** opens the locally saved asset in its own tab. Viewing saved media does not call a generation provider.
+- Experiment setup on the Experiments tab: filter persona profiles, add custom personas, choose agent count and concurrency, then explicitly start, pause, or resume a wave. Select a completed creative batch with **Select for experiment** to associate its assets with the matching headlines; without a selected batch, the wave uses text only.
+- Simulated responses, progress, decisions, and lessons are saved locally; configured analytics adapters ingest and summarize simulated events. These are model-generated responses, not measurements from real customers.
 - Server-side adapter foundations for Liquid AI, RawTree, classic Tinybird, and Black Forest Labs.
 - Empty analytics shown as not started; rates and costs without outcomes shown as “—”.
 
-Campaign execution, traffic simulation, continuous model-driven reviews, and live analytics refresh are planned for a later phase. There is no launch endpoint or background scheduler. Opening the app and saving a draft do not contact providers; headline suggestions call Liquid, and the explicit image/video generation action uses BFL credits. Integration status reports local configuration; it does not verify provider connectivity.
+Opening the app and saving a draft do not contact providers. Headline suggestions call Liquid; generating media uses BFL credits; starting or resuming a wave runs Liquid persona requests and sends analytics events. Integration status reports local configuration; it does not verify provider connectivity.
+
+The current persona judge receives text only. It can assess supplied copy and product facts, but it cannot inspect generated image pixels or watch videos. Distinct visuals are preserved for human review; simulated results do not establish visual effectiveness or isolate the effect of a headline when complete concepts differ.
+
+Creative batches persist each version's progress. If a request fails or has an unknown outcome, remaining versions stop and successful outputs stay viewable. Reloading progress does not submit another paid request, and interrupted requests are never automatically resubmitted.
 
 ## Run locally
 
@@ -41,6 +47,8 @@ npm start
 ```
 
 Open `http://127.0.0.1:3001`. Starting the server does not run a campaign or contact sponsors.
+
+Port 3001 serves the last production build. After pulling source changes, run `npm run build` again and refresh the page. For source changes to appear automatically while developing, use `npm run dev` and open port 5173.
 
 ## Provider setup
 
@@ -66,14 +74,18 @@ The tested model profile has a **65,536-token context window**. The runner sets 
 
 Riff provides two separate adapters selected with `ANALYTICS_PROVIDER`. RawTree and classic Tinybird use different credentials and API contracts.
 
-- **RawTree:** set `ANALYTICS_PROVIDER=rawtree`, `RAWTREE_API_KEY`, and the database and table settings. [RawTree’s API](https://rawtree.com/docs/reference/api) accepts event arrays and read-only SQL. This build sends no inserts.
+- **RawTree:** set `ANALYTICS_PROVIDER=rawtree`, `RAWTREE_API_KEY`, and the database and table settings. [RawTree’s API](https://rawtree.com/docs/reference/api) accepts event arrays and read-only SQL. Explicitly started persona waves send simulated events.
 - **Classic Tinybird:** set `ANALYTICS_PROVIDER=tinybird`, the workspace’s regional `TINYBIRD_BASE_URL`, and separate ingest and read tokens. The data source and parameterized query definitions are in `integrations/tinybird`; deploy them to your workspace before using this adapter. Riff does not deploy resources automatically. See Tinybird’s [Events API](https://www.tinybird.co/docs/api-reference/events-api) and [Pipe endpoints](https://www.tinybird.co/docs/api-reference/pipe-api/api-endpoints).
 
 Event spend uses integer cents. Events carry stable IDs, and metric queries deduplicate IDs before aggregation. Writes are not automatically retried after uncertain outcomes.
 
 ### Black Forest Labs
 
-Set `BFL_API_KEY`; `BFL_MODEL` selects the image endpoint. The [BFL generation guide](https://docs.bfl.ai/quick_start/generating_images) describes submission, status checks, and result delivery. Image generation is available only through the reviewed creative composer action and uses BFL credits; returned image assets are saved locally for later review. Video generation uses `BFL_VIDEO_MODEL=flux-3-video` and is gated by `BFL_VIDEO_ENABLED`, which defaults to `false`. Set it to `true` and restart the server to enable the Video selector. The [FLUX 3 API reference](https://docs.bfl.ai/api-reference/utility/generate-a-video-with-flux-3) documents the text-to-video contract. Riff starts with a five-second HD draft and audio off; each explicit generation uses credits. Generated concepts remain drafts and are not ads or campaign launches.
+Set `BFL_API_KEY`; `BFL_MODEL` selects the image endpoint. The [BFL generation guide](https://docs.bfl.ai/quick_start/generating_images) describes submission, status checks, and result delivery. Image generation is available only through the reviewed creative composer action and uses BFL credits; returned image assets are saved locally for later review. FLUX.2 Pro requests disable prompt upsampling so the reviewed direction is passed without that expansion; other configured endpoints retain their supported request fields.
+
+Video generation uses `BFL_VIDEO_MODEL=flux-3-video` and is gated by `BFL_VIDEO_ENABLED`, which defaults to `false`. Set it to `true` and restart the server to enable the Video selector. The [FLUX 3 API reference](https://docs.bfl.ai/api-reference/utility/generate-a-video-with-flux-3) documents the text-to-video contract. Riff starts with a five-second HD draft and audio off. Both image and video batches make one request per reviewed version; the button shows the count before submission. Generated concepts remain drafts and are not published ads.
+
+Existing API callers that omit `variantPrompts` retain the single shared-asset behavior. Supplying one unique `variantPrompts` entry per headline creates a distinct batch, returns `202` with a saved job, and exposes progress through the existing creative GET route. Starting a wave with media requires an explicit completed `creativeJobId` whose campaign and headlines match the request.
 
 ## Verification
 

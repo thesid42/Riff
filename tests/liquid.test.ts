@@ -78,6 +78,9 @@ describe('OpenRouter Liquid adapter', () => {
     expect(request?.body.response_format.json_schema.schema.properties).toHaveProperty('evidenceIds');
     expect(request?.body.response_format.json_schema.schema.properties.hypothesis.description).toContain('exactly the empty string');
     expect(request?.body.response_format.json_schema.schema.properties.headlines.description).toContain('empty array');
+    expect(request?.body.messages[0].content).toContain('headline-direction advice only');
+    expect(request?.body.messages[0].content).toContain('complete headline-and-visual concepts');
+    expect(request?.body.messages[0].content).not.toContain('keep the image');
     expect(result.decision).toEqual(decision);
     expect(result.metadata).toMatchObject({
       requestId: 'gen-test-123', model: openRouterModel, finishReason: 'stop',
@@ -259,10 +262,10 @@ describe('OpenRouter Liquid adapter', () => {
     await expectedTimeout;
   });
 
-  it('judges a supplied headline and media without proposing new copy', async () => {
+  it('grounds judgment in supplied copy because the media URL is not visual input', async () => {
     const judgment = {
       action: 'signup',
-      reason: 'The capacity is clear and the image looks practical.',
+      reason: 'The 750 ml capacity is clear in the headline.',
       dwellSeconds: 9,
       timeToActionSeconds: 5,
       confidence: 0.8,
@@ -289,6 +292,13 @@ describe('OpenRouter Liquid adapter', () => {
     expect(body?.response_format.json_schema.name).toBe('persona_judgment');
     expect(body?.messages[1].content).toContain('A 750 ml bottle for every day');
     expect(body?.messages[1].content).toContain('Take 750 ml along for the day');
+    expect(body?.messages[0].content).toContain('cannot see image pixels or watch video');
+    expect(body?.messages[0].content).toContain('mediaUrl is a reference string rather than media input');
+    expect(body?.messages[0].content).toContain('Do not describe, score, or infer visual quality');
+    expect(body?.messages[0].content).not.toContain('shared media');
+    expect(JSON.parse(body?.messages[1].content as string)).toMatchObject({
+      mediaUrl: '/api/creative-assets/job-1', mediaType: 'image',
+    });
     expect(result.judgment).toEqual(judgment);
     expect(result.metadata.elapsedMs).toBeGreaterThanOrEqual(0);
     expect(result.metadata.usage?.promptTokens).toBe(200);

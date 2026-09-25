@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import userEvent from '@testing-library/user-event';
 import App from '../src/App.js';
 import { emptyMetricsSnapshot, type Campaign, type IntegrationStatus } from '../shared/types.js';
+import { emptyWaveSnapshot } from '../shared/run.js';
 
 const createdAt = '2026-09-24T18:00:00.000Z';
 
@@ -23,9 +24,20 @@ function fixtureIntegration(): IntegrationStatus {
   };
 }
 
-function installApi(options: { rejectCreate?: boolean; integrations?: IntegrationStatus[] } = {}) {
+function installApi(options: {
+  rejectCreate?: boolean;
+  integrations?: IntegrationStatus[];
+  campaigns?: Campaign[];
+  creativeResponses?: Record<string, {
+    imagePromptSuggestion: string;
+    jobs: unknown[];
+    headlines?: string[];
+    capabilities?: { image?: boolean; video?: boolean };
+  }>;
+} = {}) {
   const calls: Array<{ url: string; method: string; body?: unknown }> = [];
   const campaign = fixtureCampaign();
+  const campaigns = options.campaigns ?? [campaign];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init: RequestInit = {}) => {
     const url = String(input);
     const method = init.method ?? 'GET';
@@ -39,10 +51,17 @@ function installApi(options: { rejectCreate?: boolean; integrations?: Integratio
       return jsonResponse({ error: { code: 'validation_error', message: 'Campaign details are invalid.' } }, 400);
     }
     if (method === 'POST' && url === '/api/campaigns') return jsonResponse({ campaign });
-    if (url === '/api/campaigns') return jsonResponse({ campaigns: [] });
+    if (method === 'POST' && /^\/api\/campaigns\/[^/]+\/run$/.test(url)) return jsonResponse({ wave: emptyWaveSnapshot() });
+    if (url === '/api/campaigns') return jsonResponse({ campaigns: options.campaigns ?? [] });
     if (url === '/api/integrations') return jsonResponse({ integrations: options.integrations ?? [] });
-    if (url === `/api/campaigns/${campaign.id}`) return jsonResponse({ campaign, variants: [], experiments: [], lessons: [] });
-    if (url === `/api/campaigns/${campaign.id}/metrics`) return jsonResponse(emptyMetricsSnapshot(campaign.id));
+    const creativeCampaign = campaigns.find((item) => url === `/api/campaigns/${item.id}/creative`);
+    if (creativeCampaign) return jsonResponse(options.creativeResponses?.[creativeCampaign.id] ?? {
+      imagePromptSuggestion: `Product photography for ${creativeCampaign.product}.`, jobs: [],
+    });
+    const selectedCampaign = campaigns.find((item) => url === `/api/campaigns/${item.id}`);
+    if (selectedCampaign) return jsonResponse({ campaign: selectedCampaign, variants: [], experiments: [], lessons: [] });
+    const metricsCampaign = campaigns.find((item) => url === `/api/campaigns/${item.id}/metrics`);
+    if (metricsCampaign) return jsonResponse(emptyMetricsSnapshot(metricsCampaign.id));
     return jsonResponse({ error: { code: 'not_found', message: 'Unexpected request.' } }, 404);
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -152,5 +171,100 @@ describe('Riff dashboard', () => {
     expect(screen.queryByText('LIQUID_BASE_URL')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'View missing settings' }));
     expect(screen.getByText('LIQUID_BASE_URL')).toBeTruthy();
+  });
+
+  it('restores headlines from ready legacy jobs and keeps campaign drafts isolated while navigating', async () => {
+    const imageHeadlines = ['A bottle for daily refills', 'Stay ready for the next refill'];
+    const videoHeadlines = ['Water for the whole commute', 'Take a refill wherever you go'];
+    const customPersona = {
+      id: 'custom-commuter', ageBand: '25-34' as const, work: 'specialist' as const, job: 'commuter',
+      country: 'United States', location: 'Seattle', language: 'English', device: 'phone' as const,
+      household: 'partner' as const, label: '25–34 commuter · Seattle, United States',
+      card: 'You commute by train and look for practical products.', custom: true,
+    };
+    const campaignOne = fixtureCampaign({ id: 'campaign-1', customPersonas: [customPersona] });
+    const campaignTwo = fixtureCampaign({
+      id: 'campaign-2', name: 'Desk refill', product: 'Insulated bottle', audience: 'Office workers', customPersonas: [],
+    });
+    const legacyImageJob = {
+      id: 'legacy-image-job', campaignId: campaignOne.id, headlines: imageHeadlines,
+      imagePrompt: 'An insulated bottle on a desk.', mediaType: 'image', status: 'ready',
+      imageUrl: null, videoUrl: null, videoOptions: null, error: null, providerTaskId: null,
+      createdAt, updatedAt: createdAt,
+    };
+    const legacyVideoJob = {
+      id: 'legacy-video-job', campaignId: campaignTwo.id, headlines: videoHeadlines,
+      imagePrompt: 'A short bottle video on a commute.', mediaType: 'video', status: 'ready',
+      imageUrl: null, videoUrl: null, videoOptions: null, error: null, providerTaskId: null,
+      createdAt, updatedAt: createdAt,
+    };
+    const { calls } = installApi({
+      campaigns: [campaignOne, campaignTwo],
+      creativeResponses: {
+        [campaignOne.id]: {
+          imagePromptSuggestion: 'A clean product photo of a reusable bottle.',
+          headlines: [], jobs: [legacyImageJob], capabilities: { image: true, video: true },
+        },
+        [campaignTwo.id]: {
+          imagePromptSuggestion: 'A clean product photo of an insulated bottle.',
+          headlines: [], jobs: [legacyVideoJob], capabilities: { image: true, video: true },
+        },
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    const versionsTitle = await screen.findByText('Versions', { exact: true });
+    expect(versionsTitle.closest('details')?.open).toBe(false);
+    expect((screen.getByRole('button', { name: 'Generate 2 images' }) as HTMLButtonElement).disabled).toBe(false);
+    await user.click(versionsTitle);
+    const firstHeadline = await screen.findByRole('textbox', { name: 'Version A headline' }) as HTMLInputElement;
+    await waitFor(() => expect(firstHeadline.value).toBe(imageHeadlines[0]));
+    expect((screen.getByRole('textbox', { name: 'Version B headline' }) as HTMLInputElement).value).toBe(imageHeadlines[1]);
+    expect((screen.getByRole('button', { name: 'Generate 2 images' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(calls.some((call) => call.method === 'POST' && call.url.endsWith('/creative/images'))).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
+    expect(await screen.findByText(`Judging: ${imageHeadlines.join(' · ')}`)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(false);
+    expect(screen.getByText(/plus 1 custom on this draft/)).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Campaign', exact: true }));
+    await user.click(screen.getByText('Saved creative drafts', { exact: true }));
+    await user.click(screen.getByRole('button', { name: 'Select for experiment' }));
+    expect(await screen.findByText(/Saved creative attached/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Start wave' }));
+    await waitFor(() => expect(calls.some((call) => call.method === 'POST' && call.url === '/api/campaigns/campaign-1/run')).toBe(true));
+    expect(calls.find((call) => call.method === 'POST' && call.url === '/api/campaigns/campaign-1/run')?.body).toMatchObject({
+      headlines: imageHeadlines,
+      creativeJobId: 'legacy-image-job',
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Campaign', exact: true }));
+    await user.click(screen.getByText('Versions', { exact: true }));
+    const editedHeadline = 'Refill anywhere on the go';
+    await user.clear(screen.getByRole('textbox', { name: 'Version A headline' }));
+    await user.type(screen.getByRole('textbox', { name: 'Version A headline' }), editedHeadline);
+    await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
+    expect(await screen.findByText(`Judging: ${editedHeadline} · ${imageHeadlines[1]}`)).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: 'Campaign', exact: true }));
+    await user.click(screen.getByText('Versions', { exact: true }));
+    expect((screen.getByRole('textbox', { name: 'Version A headline' }) as HTMLInputElement).value).toBe(editedHeadline);
+    await user.clear(screen.getByRole('textbox', { name: 'Version B headline' }));
+    await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
+    expect(await screen.findByText('Add 2–3 unique, non-empty headlines in Campaign before starting.')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Choose campaign' }), campaignTwo.id);
+    await user.click(screen.getByRole('button', { name: 'Campaign', exact: true }));
+    await user.click(screen.getByText('Versions', { exact: true }));
+    const secondCampaignHeadline = await screen.findByRole('textbox', { name: 'Version A headline' }) as HTMLInputElement;
+    await waitFor(() => expect(secondCampaignHeadline.value).toBe(videoHeadlines[0]));
+    expect((screen.getByRole('textbox', { name: 'Version B headline' }) as HTMLInputElement).value).toBe(videoHeadlines[1]);
+    expect(secondCampaignHeadline.value).not.toBe(editedHeadline);
+    await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
+    expect(await screen.findByText(`Judging: ${videoHeadlines.join(' · ')}`)).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

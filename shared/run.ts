@@ -13,6 +13,7 @@ export const headlineSetSchema = z.array(z.string().trim().min(1).max(120)).min(
 export const runWaveSchema = z.object({
   agentCount: z.number().int().min(MIN_AGENT_COUNT).max(MAX_AGENT_COUNT).default(DEFAULT_AGENT_COUNT),
   concurrency: z.number().int().min(1).max(MAX_CONCURRENCY).default(DEFAULT_CONCURRENCY),
+  creativeJobId: z.string().uuid().optional(),
   headlines: headlineSetSchema.optional(),
   profileMix: z.array(z.string().trim().min(1).max(80)).max(40).optional(),
 }).strict();

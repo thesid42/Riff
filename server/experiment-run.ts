@@ -102,7 +102,12 @@ export class ExperimentRunService {
     return this.options.database.setHeadlines(campaign.id, parsed.data, new Date().toISOString()) ?? campaign;
   }
 
-  async start(campaign: Campaign, input: RunWaveInput, media: { imageUrl: string | null; videoUrl: string | null }): Promise<WaveSnapshot> {
+  async start(
+    campaign: Campaign,
+    input: RunWaveInput,
+    media: Array<{ imageUrl: string | null; videoUrl: string | null }>,
+    visualMode: 'shared' | 'distinct' | 'text-only' = 'text-only',
+  ): Promise<WaveSnapshot> {
     if (!this.options.liquid) throw new RunServiceError(503, 'liquid_unavailable', 'Liquid is not configured.');
     if (!this.options.analytics) throw new RunServiceError(503, 'analytics_unavailable', 'Analytics is not configured.');
     if (campaign.runtime === 'running') throw new RunServiceError(409, 'wave_active', 'This draft already has a persona wave running.');
@@ -113,7 +118,11 @@ export class ExperimentRunService {
     const experiment = this.options.database.createExperiment({
       id: randomUUID(),
       campaignId: campaign.id,
-      hypothesis: `Compare Liquid headlines while holding the offer and shared media constant.`,
+      hypothesis: visualMode === 'distinct'
+        ? 'Compare complete campaign concepts, including each headline and its paired visual, while holding the offer constant.'
+        : visualMode === 'shared'
+          ? 'Compare headline directions while holding the offer and shared media constant.'
+          : 'Compare headline directions with text-only variants while holding the offer constant.',
       status: 'collecting',
       windowStart: now,
       createdAt: now,
@@ -126,8 +135,8 @@ export class ExperimentRunService {
       headline,
       offer: DEFAULT_OFFER,
       status: 'ready' as const,
-      imageUrl: media.imageUrl,
-      videoUrl: media.videoUrl,
+      imageUrl: media[index]?.imageUrl ?? null,
+      videoUrl: media[index]?.videoUrl ?? null,
       parentId: null,
       createdAt: now,
     }));
