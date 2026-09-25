@@ -6,6 +6,7 @@ import {
   type IntegrationStatus,
 } from '../shared/types.js';
 import { persistHeadlinesSchema, runWaveSchema } from '../shared/run.js';
+import { createCustomPersona, customPersonaSchema } from '../shared/personas.js';
 import { creativeImageRequestSchema, creativeVideoRequestSchema } from '../shared/creative.js';
 import { CampaignDatabase } from './database.js';
 import { createProviders, getIntegrationStatuses, readMaxAutoRounds, readSuccessClickRate, type Providers } from './providers/index.js';
@@ -149,6 +150,30 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     catch (error) { return sendRunError(reply, error); }
   });
 
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/personas', async (request, reply) => {
+    const parsed = customPersonaSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'validation_error', message: 'Persona details are invalid.' } });
+    }
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    if (campaign.customPersonas.length >= 24) {
+      return reply.code(400).send({ error: { code: 'persona_limit', message: 'This draft already has 24 custom personas.' } });
+    }
+    const added = createCustomPersona(parsed.data, randomUUID());
+    const next = database.setCustomPersonas(campaign.id, [...campaign.customPersonas, added], new Date().toISOString());
+    return { campaign: next, persona: added };
+  });
+
+  app.post<{ Params: { id: string; personaId: string } }>('/api/campaigns/:id/personas/:personaId/delete', async (request, reply) => {
+    if (!isEmptyObject(request.body)) return reply.code(400).send({ error: { code: 'validation_error', message: 'The delete request must be an empty JSON object.' } });
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    const next = campaign.customPersonas.filter((persona) => persona.id !== request.params.personaId);
+    if (next.length === campaign.customPersonas.length) return notFound(reply, 'Persona');
+    return { campaign: database.setCustomPersonas(campaign.id, next, new Date().toISOString()) };
+  });
+
   app.post<{ Params: { id: string } }>('/api/campaigns/:id/run', async (request, reply) => {
     const parsed = runWaveSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
@@ -157,8 +182,32 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     const campaign = database.getCampaign(request.params.id);
     if (!campaign) return notFound(reply, 'Campaign');
     try {
-      const media = readyMedia(database.listCreativeJobs(campaign.id));
-      return { wave: await runner.start(campaign, parsed.data, media) };
+      const selectedHeadlines = parsed.data.headlines?.length ? parsed.data.headlines : campaign.headlines;
+      let media: Array<{ imageUrl: string | null; videoUrl: string | null }> = selectedHeadlines.map(() => ({ imageUrl: null, videoUrl: null }));
+      let visualMode: 'shared' | 'distinct' | 'text-only' = 'text-only';
+      if (parsed.data.creativeJobId) {
+        const job = database.getCreativeJob(parsed.data.creativeJobId);
+        if (!job || job.campaignId !== campaign.id) throw new RunServiceError(409, 'creative_job_mismatch', 'The selected creative job does not belong to this campaign.');
+        if (job.status !== 'ready') throw new RunServiceError(409, 'creative_job_not_ready', 'The selected creative job is not ready to use.');
+        if (job.headlines.length !== selectedHeadlines.length || job.headlines.some((headline, index) => headline !== selectedHeadlines[index])) {
+          throw new RunServiceError(409, 'creative_headlines_mismatch', 'The selected creative job was created for a different headline order.');
+        }
+        visualMode = job.visualMode;
+        if (job.visualMode === 'distinct') {
+          if (job.outputs.length !== selectedHeadlines.length || job.outputs.some((output, index) =>
+            output.index !== index || output.headline !== selectedHeadlines[index] || output.status !== 'ready' ||
+            (job.mediaType === 'image' ? !output.imageUrl || !!output.videoUrl : !output.videoUrl || !!output.imageUrl))) {
+            throw new RunServiceError(409, 'creative_job_not_ready', 'Every selected creative variant must be ready before starting the wave.');
+          }
+          media = job.outputs.map((output) => ({ imageUrl: output.imageUrl, videoUrl: output.videoUrl }));
+        } else {
+          if (job.mediaType === 'image' ? !job.imageUrl || !!job.videoUrl : !job.videoUrl || !!job.imageUrl) {
+            throw new RunServiceError(409, 'creative_job_not_ready', 'The selected creative job has no ready local media asset.');
+          }
+          media = selectedHeadlines.map(() => ({ imageUrl: job.imageUrl, videoUrl: job.videoUrl }));
+        }
+      }
+      return { wave: await runner.start(campaign, parsed.data, media, visualMode) };
     } catch (error) { return sendRunError(reply, error); }
   });
 
@@ -205,7 +254,10 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     }
     const campaign = database.getCampaign(request.params.id);
     if (!campaign) return notFound(reply, 'Campaign');
-    try { return { job: await creative.createImageJob(campaign, parsed.data) }; }
+    try {
+      const job = await creative.createImageJob(campaign, parsed.data);
+      return reply.code(job.visualMode === 'distinct' && (job.status === 'submitting' || job.status === 'generating') ? 202 : 200).send({ job });
+    }
     catch (error) { return sendCreativeError(reply, error); }
   });
 
@@ -222,7 +274,10 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     }
     const campaign = database.getCampaign(request.params.id);
     if (!campaign) return notFound(reply, 'Campaign');
-    try { return { job: await creative.createVideoJob(campaign, parsed.data) }; }
+    try {
+      const job = await creative.createVideoJob(campaign, parsed.data);
+      return reply.code(job.visualMode === 'distinct' && (job.status === 'submitting' || job.status === 'generating') ? 202 : 200).send({ job });
+    }
     catch (error) { return sendCreativeError(reply, error); }
   });
 
@@ -275,12 +330,10 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   app.decorate('waitForCreativeIdle', () => creative.waitForIdle());
 
   app.addHook('preClose', async () => {
-    await runner.close();
-    await creative.close();
+    await Promise.all([runner.close(), creative.close()]);
   });
   app.addHook('onClose', async () => {
-    await runner.close();
-    await creative.close();
+    await Promise.all([runner.close(), creative.close()]);
     database.close();
   });
   return app;
@@ -292,11 +345,6 @@ function notFound(reply: FastifyReply, entity: string): FastifyReply {
 
 function isEmptyObject(value: unknown): boolean {
   return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0;
-}
-
-function readyMedia(jobs: Array<{ status: string; imageUrl: string | null; videoUrl: string | null }>): { imageUrl: string | null; videoUrl: string | null } {
-  const ready = jobs.find((job) => job.status === 'ready');
-  return { imageUrl: ready?.imageUrl ?? null, videoUrl: ready?.videoUrl ?? null };
 }
 
 function sendRunError(reply: FastifyReply, error: unknown): FastifyReply {

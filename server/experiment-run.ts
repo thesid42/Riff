@@ -42,7 +42,7 @@ export class ExperimentRunService {
   private readonly reviewErrors = new Map<string, string>();
   private readonly loopStatuses = new Map<string, LoopStatus>();
   /** Media carried into each chained round so every wave shares the approved creative. */
-  private readonly loopMedia = new Map<string, { imageUrl: string | null; videoUrl: string | null }>();
+  private readonly loopMedia = new Map<string, Array<{ imageUrl: string | null; videoUrl: string | null }>>();
   /** Timers for chained rounds that have not started yet, so shutdown can cancel them. */
   private readonly pendingRounds = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -58,7 +58,7 @@ export class ExperimentRunService {
       headlines: campaign.headlines,
       experimentId: experiment?.id ?? null,
       progress: jobProgress(jobs),
-      segments: segmentMetrics(jobs),
+      segments: segmentMetrics(jobs, campaign.customPersonas),
       deciderSpeed: deciderSpeed(jobs),
       latestDecision: this.options.database.latestDecision(campaign.id) ?? null,
       lastError: lastJobError(jobs),
@@ -184,7 +184,12 @@ export class ExperimentRunService {
     return this.options.database.setHeadlines(campaign.id, parsed.data, new Date().toISOString()) ?? campaign;
   }
 
-  async start(campaign: Campaign, input: RunWaveInput, media: { imageUrl: string | null; videoUrl: string | null }): Promise<WaveSnapshot> {
+  async start(
+    campaign: Campaign,
+    input: RunWaveInput,
+    media: Array<{ imageUrl: string | null; videoUrl: string | null }>,
+    visualMode: 'shared' | 'distinct' | 'text-only' = 'text-only',
+  ): Promise<WaveSnapshot> {
     if (!this.options.liquid) throw new RunServiceError(503, 'liquid_unavailable', 'Liquid is not configured.');
     if (!this.options.analytics) throw new RunServiceError(503, 'analytics_unavailable', 'Analytics is not configured.');
     if (campaign.runtime === 'running') throw new RunServiceError(409, 'wave_active', 'This draft already has a persona wave running.');
@@ -198,7 +203,11 @@ export class ExperimentRunService {
     const experiment = this.options.database.createExperiment({
       id: randomUUID(),
       campaignId: campaign.id,
-      hypothesis: `Compare Liquid headlines while holding the offer and shared media constant.`,
+      hypothesis: visualMode === 'distinct'
+        ? 'Compare complete campaign concepts, including each headline and its paired visual, while holding the offer constant.'
+        : visualMode === 'shared'
+          ? 'Compare headline directions while holding the offer and shared media constant.'
+          : 'Compare headline directions with text-only variants while holding the offer constant.',
       status: 'collecting',
       windowStart: now,
       createdAt: now,
@@ -211,8 +220,8 @@ export class ExperimentRunService {
       headline,
       offer: DEFAULT_OFFER,
       status: 'ready' as const,
-      imageUrl: media.imageUrl,
-      videoUrl: media.videoUrl,
+      imageUrl: media[index]?.imageUrl ?? null,
+      videoUrl: media[index]?.videoUrl ?? null,
       parentId: null,
       createdAt: now,
     }));
@@ -222,6 +231,7 @@ export class ExperimentRunService {
       agentCount: input.agentCount,
       variantIds: variants.map((variant) => variant.id),
       personaIds: input.profileMix,
+      extras: campaign.customPersonas,
     });
     this.options.database.enqueueAgentJobs(assignments.map((assignment) => ({
       id: randomUUID(),
@@ -377,7 +387,7 @@ export class ExperimentRunService {
   private async judge(job: AgentJob) {
     const campaign = this.options.database.getCampaign(job.campaignId);
     const variant = this.options.database.getVariant(job.variantId);
-    const persona = personaById(job.personaId);
+    const persona = personaById(job.personaId, campaign?.customPersonas);
     if (!campaign || !variant || !persona || !this.options.liquid) throw new RunServiceError(500, 'job_missing', 'The persona job lost its campaign context.');
     const siblings = this.options.database.listExperimentVariants(job.experimentId)
       .map((item) => item.headline)
@@ -435,7 +445,7 @@ export class ExperimentRunService {
     // The threshold decides whether to chain another round, not whether to review. Step 6 always
     // runs so the decision and lesson are recorded for this round either way.
     const thresholdMet = bestClickRate != null && bestClickRate >= threshold;
-    const segments = segmentMetrics(jobs);
+    const segments = segmentMetrics(jobs, campaign.customPersonas);
     const evidence = segments.map((segment, index) => ({
       id: `SEG-${String(index + 1).padStart(2, '0')}`,
       summary: `${segment.label}: ${segment.signups}/${segment.views} sign-ups, median decide ${segment.medianDecideMs ?? '—'} ms, confidence ${segment.averageConfidence == null ? '—' : segment.averageConfidence.toFixed(2)}, friction ${segment.topFriction ?? 'none'}.`,
@@ -511,7 +521,7 @@ export class ExperimentRunService {
         const campaign = this.options.database.getCampaign(campaignId);
         if (!campaign || campaign.runtime !== 'idle') return;
         if (this.workers.has(campaignId)) return;
-        const media = this.loopMedia.get(campaignId) ?? { imageUrl: null, videoUrl: null };
+        const media = this.loopMedia.get(campaignId) ?? [];
         try {
           await this.start(campaign, {
             headlines: campaign.headlines,

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { PersonaTemplate } from './personas.js';
 import type { CampaignRuntime } from './run.js';
 
 export const campaignInputSchema = z.object({
@@ -27,6 +28,7 @@ export interface Campaign {
   agentCount: number;
   concurrency: number;
   headlines: string[];
+  customPersonas: PersonaTemplate[];
   createdAt: string;
   updatedAt: string;
 }

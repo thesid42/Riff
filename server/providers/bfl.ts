@@ -19,7 +19,10 @@ export class BflClient {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width < 256 || height < 256 || width > 2048 || height > 2048) throw new ProviderError('Image dimensions must be integers from 256 to 2048.', 'configuration');
     const timeout = timeoutSignal(30_000, signal);
     try {
-      const response = await this.fetchImpl(`https://api.bfl.ai/v1/${this.model}`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json', 'x-key': this.apiKey }, body: JSON.stringify({ prompt: cleanPrompt, width, height }), redirect: 'error', signal: timeout.signal });
+      const body = this.model === 'flux-2-pro'
+        ? { prompt: cleanPrompt, width, height, disable_pup: true }
+        : { prompt: cleanPrompt, width, height };
+      const response = await this.fetchImpl(`https://api.bfl.ai/v1/${this.model}`, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json', 'x-key': this.apiKey }, body: JSON.stringify(body), redirect: 'error', signal: timeout.signal });
       await rejectRedirect(response);
       if (!response.ok) { await cancelBody(response); throw new ProviderError(`BFL request failed with HTTP ${response.status}.`); }
       const result = object(await readJson(response, 64_000, timeout.signal));

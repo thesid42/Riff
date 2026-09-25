@@ -213,6 +213,20 @@ describe('BFL image adapter', () => {
     expect(fixture.calls[1].url.href).toBe(pollingUrl);
     expect(fixture.calls[1].init.headers).toMatchObject({ 'x-key': 'bfl-secret' });
     expect(fixture.calls.every(call => call.init.redirect === 'error')).toBe(true);
+    expect(JSON.parse(String(fixture.calls[0].init.body))).toEqual({
+      prompt: 'A clean product image.', width: 1024, height: 1024, disable_pup: true,
+    });
+  });
+
+  it('keeps FLUX.2 Pro prompt flags off configured legacy endpoints', async () => {
+    const fixture = captureFetch(() => responseJson({ id, polling_url: pollingUrl }));
+    const client = new BflClient('bfl-secret', fixture.fetch, 'flux-pro');
+    await client.submit('A product on a plain background.', 640, 768);
+
+    expect(fixture.calls[0].url.pathname).toBe('/v1/flux-pro');
+    expect(JSON.parse(String(fixture.calls[0].init.body))).toEqual({
+      prompt: 'A product on a plain background.', width: 640, height: 768,
+    });
   });
 
   it('rejects mismatched or attacker controlled polling URLs before sending credentials', async () => {

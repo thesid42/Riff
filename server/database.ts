@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { Campaign, CampaignInput, Experiment, Lesson, Variant } from '../shared/types.js';
-import type { CreativeImageJob, CreativeImageJobStatus, CreativeVideoOptions } from '../shared/creative.js';
+import type { CreativeImageJob, CreativeImageJobStatus, CreativeVariantOutput, CreativeVariantOutputStatus, CreativeVideoOptions } from '../shared/creative.js';
 import {
   DEFAULT_AGENT_COUNT,
   DEFAULT_CONCURRENCY,
@@ -20,7 +20,18 @@ export interface StoredCreativeImageJob extends CreativeImageJob {
   height: number;
   pollingUrl: string | null;
   contentType: 'image/png' | 'image/jpeg' | 'image/webp' | 'video/mp4' | null;
+  outputs: StoredCreativeVariantOutput[];
+  visualMode: 'shared' | 'distinct';
 }
+
+export interface StoredCreativeVariantOutput extends CreativeVariantOutput {
+  pollingUrl: string | null;
+  contentType: 'image/png' | 'image/jpeg' | 'image/webp' | 'video/mp4' | null;
+  mediaType: 'image' | 'video';
+}
+
+export type CreativeOutputPatch = Partial<Pick<StoredCreativeVariantOutput,
+  'status' | 'imageUrl' | 'videoUrl' | 'error' | 'providerTaskId' | 'pollingUrl' | 'contentType'>>;
 
 export type CreativeReservation =
   | { kind: 'created'; job: StoredCreativeImageJob }
@@ -213,12 +224,43 @@ export class CampaignDatabase {
         PRAGMA user_version = 4;
       `);
     }
+    // A local dev watcher may have applied the creative outputs schema as an interim v5.
+    // Inspect columns/tables instead of trusting only user_version so both v5 layouts migrate.
+    const campaignColumns = new Set((this.#database.prepare('PRAGMA table_info(campaigns)').all() as Array<{ name: string }>).map((column) => column.name));
+    if (!campaignColumns.has('custom_personas')) {
+      this.#database.exec("ALTER TABLE campaigns ADD COLUMN custom_personas TEXT NOT NULL DEFAULT '[]'");
+    }
+    const creativeColumns = new Set((this.#database.prepare('PRAGMA table_info(creative_image_jobs)').all() as Array<{ name: string }>).map((column) => column.name));
+    if (!creativeColumns.has('visual_mode')) {
+      this.#database.exec("ALTER TABLE creative_image_jobs ADD COLUMN visual_mode TEXT NOT NULL DEFAULT 'shared' CHECK (visual_mode IN ('shared', 'distinct'))");
+    }
+    this.#database.exec(`
+      CREATE TABLE IF NOT EXISTS creative_job_outputs (
+        id TEXT PRIMARY KEY,
+        job_id TEXT NOT NULL REFERENCES creative_image_jobs(id) ON DELETE CASCADE,
+        output_index INTEGER NOT NULL CHECK (output_index >= 0),
+        headline TEXT NOT NULL,
+        image_prompt TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('queued', 'submitting', 'generating', 'ready', 'failed', 'uncertain', 'skipped')),
+        image_url TEXT,
+        video_url TEXT,
+        error TEXT,
+        provider_task_id TEXT,
+        polling_url TEXT,
+        content_type TEXT CHECK (content_type IS NULL OR content_type IN ('image/png', 'image/jpeg', 'image/webp', 'video/mp4')),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE (job_id, output_index)
+      );
+      CREATE INDEX IF NOT EXISTS creative_job_outputs_job_order ON creative_job_outputs(job_id, output_index);
+      PRAGMA user_version = 6;
+    `);
   }
 
   listCampaigns(): Campaign[] {
     const rows = this.#database.prepare(`
       SELECT id, name, product, audience, goal, approved_claims, budget_cents,
-             currency, status, runtime, agent_count, concurrency, headlines, created_at, updated_at
+             currency, status, runtime, agent_count, concurrency, headlines, custom_personas, created_at, updated_at
       FROM campaigns ORDER BY created_at DESC, id DESC
     `).all() as unknown as CampaignRow[];
     return rows.map(toCampaign);
@@ -227,7 +269,7 @@ export class CampaignDatabase {
   getCampaign(id: string): Campaign | undefined {
     const row = this.#database.prepare(`
       SELECT id, name, product, audience, goal, approved_claims, budget_cents,
-             currency, status, runtime, agent_count, concurrency, headlines, created_at, updated_at
+             currency, status, runtime, agent_count, concurrency, headlines, custom_personas, created_at, updated_at
       FROM campaigns WHERE id = ?
     `).get(id) as unknown as CampaignRow | undefined;
     return row ? toCampaign(row) : undefined;
@@ -237,8 +279,8 @@ export class CampaignDatabase {
     const data = input;
     this.#database.prepare(`
       INSERT INTO campaigns
-        (id, name, product, audience, goal, approved_claims, budget_cents, currency, status, runtime, agent_count, concurrency, headlines, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'idle', ?, ?, '[]', ?, ?)
+        (id, name, product, audience, goal, approved_claims, budget_cents, currency, status, runtime, agent_count, concurrency, headlines, custom_personas, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'idle', ?, ?, '[]', '[]', ?, ?)
     `).run(id, data.name, data.product, data.audience, data.goal, JSON.stringify(data.approvedClaims), data.budgetCents, data.currency, DEFAULT_AGENT_COUNT, DEFAULT_CONCURRENCY, now, now);
     return this.getCampaign(id)!;
   }
@@ -247,18 +289,20 @@ export class CampaignDatabase {
     const rows = this.#database.prepare(`
       SELECT * FROM creative_image_jobs WHERE campaign_id = ? ORDER BY created_at DESC, id DESC
     `).all(campaignId) as unknown as CreativeJobRow[];
-    return rows.map(toCreativeJob);
+    return rows.map((row) => publicCreativeJob(this.getCreativeJob(row.id)!));
   }
 
   getCreativeJob(id: string): StoredCreativeImageJob | undefined {
     const row = this.#database.prepare('SELECT * FROM creative_image_jobs WHERE id = ?').get(id) as unknown as CreativeJobRow | undefined;
-    return row ? toStoredCreativeJob(row) : undefined;
+    return row ? toStoredCreativeJob(row, this.listCreativeOutputs(id)) : undefined;
   }
 
-  reserveCreativeJob(input: Omit<StoredCreativeImageJob, 'providerTaskId' | 'pollingUrl' | 'contentType'> & {
+  reserveCreativeJob(input: Omit<StoredCreativeImageJob, 'providerTaskId' | 'pollingUrl' | 'contentType' | 'outputs' | 'visualMode'> & {
     providerTaskId?: string | null;
     pollingUrl?: string | null;
     contentType?: StoredCreativeImageJob['contentType'];
+    visualMode?: 'shared' | 'distinct';
+    outputs?: Array<Pick<CreativeVariantOutput, 'id' | 'index' | 'headline' | 'imagePrompt'> & Partial<Pick<CreativeVariantOutput, 'status' | 'createdAt' | 'updatedAt'>>>;
   }): CreativeReservation {
     this.#database.exec('BEGIN IMMEDIATE');
     try {
@@ -281,17 +325,64 @@ export class CampaignDatabase {
       this.#database.prepare(`
       INSERT INTO creative_image_jobs
           (id, campaign_id, request_hash, headlines, image_prompt, model, media_type, video_options, width, height, status,
-           image_url, video_url, error, provider_task_id, polling_url, content_type, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           image_url, video_url, error, provider_task_id, polling_url, content_type, created_at, updated_at, visual_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(input.id, input.campaignId, input.requestHash, JSON.stringify(input.headlines), input.imagePrompt,
         input.model, input.mediaType, input.videoOptions === null ? null : JSON.stringify(input.videoOptions), input.width, input.height, input.status, input.imageUrl, input.videoUrl, input.error, input.providerTaskId ?? null,
-        input.pollingUrl ?? null, input.contentType ?? null, input.createdAt, input.updatedAt);
+        input.pollingUrl ?? null, input.contentType ?? null, input.createdAt, input.updatedAt, input.visualMode ?? 'shared');
+      if (input.outputs?.length) {
+        const insertOutput = this.#database.prepare(`
+          INSERT INTO creative_job_outputs
+            (id, job_id, output_index, headline, image_prompt, status, image_url, video_url, error,
+             provider_task_id, polling_url, content_type, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+        `);
+        for (const output of input.outputs) {
+          const outputNow = output.createdAt ?? input.createdAt;
+          insertOutput.run(output.id, input.id, output.index, output.headline, output.imagePrompt, output.status ?? 'queued', outputNow, output.updatedAt ?? input.updatedAt);
+        }
+      }
       this.#database.exec('COMMIT');
       return { kind: 'created', job: this.getCreativeJob(input.id)! };
     } catch (error) {
       try { this.#database.exec('ROLLBACK'); } catch { /* The transaction may already have rolled back. */ }
       throw error;
     }
+  }
+
+  getCreativeOutput(id: string): StoredCreativeVariantOutput | undefined {
+    const row = this.#database.prepare(`SELECT o.*, j.media_type AS parent_media_type FROM creative_job_outputs o
+      JOIN creative_image_jobs j ON j.id = o.job_id WHERE o.id = ?`).get(id) as unknown as CreativeOutputRow | undefined;
+    return row ? toCreativeOutput(row) : undefined;
+  }
+
+  listCreativeOutputs(jobId: string): StoredCreativeVariantOutput[] {
+    const rows = this.#database.prepare(`SELECT o.*, j.media_type AS parent_media_type FROM creative_job_outputs o
+      JOIN creative_image_jobs j ON j.id = o.job_id WHERE o.job_id = ? ORDER BY o.output_index ASC`)
+      .all(jobId) as unknown as CreativeOutputRow[];
+    return rows.map(toCreativeOutput);
+  }
+
+  updateCreativeOutput(id: string, patch: CreativeOutputPatch, now: string): StoredCreativeVariantOutput | undefined {
+    const current = this.getCreativeOutput(id);
+    if (!current) return undefined;
+    const next: StoredCreativeVariantOutput = { ...current, ...patch, updatedAt: now };
+    this.#database.prepare(`
+      UPDATE creative_job_outputs SET status = ?, image_url = ?, video_url = ?, error = ?, provider_task_id = ?,
+        polling_url = ?, content_type = ?, updated_at = ? WHERE id = ?
+    `).run(next.status, next.imageUrl, next.videoUrl, next.error, next.providerTaskId, next.pollingUrl, next.contentType, next.updatedAt, id);
+    return this.getCreativeOutput(id);
+  }
+
+  finishDistinctCreativeJob(id: string, status: CreativeImageJobStatus, error: string | null, now: string): StoredCreativeImageJob | undefined {
+    this.#database.prepare(`
+      UPDATE creative_job_outputs SET status = 'skipped', error = ?, updated_at = ?
+      WHERE job_id = ? AND status = 'queued'
+    `).run('Skipped because an earlier variant did not complete.', now, id);
+    this.#database.prepare(`
+      UPDATE creative_image_jobs SET status = ?, error = ?, updated_at = ? WHERE id = ? AND visual_mode = 'distinct'
+    `).run(status, error, now, id);
+    return this.getCreativeJob(id);
   }
 
   updateCreativeJob(id: string, patch: CreativeJobPatch, now: string): StoredCreativeImageJob | undefined {
@@ -307,10 +398,42 @@ export class CampaignDatabase {
 
   markInterruptedCreativeJobs(now: string): void {
     this.#database.prepare(`
-      UPDATE creative_image_jobs
+      UPDATE creative_job_outputs
       SET status = 'uncertain', error = 'Generation was interrupted by a server restart. Review provider status before starting another job.', updated_at = ?
       WHERE status IN ('submitting', 'generating')
     `).run(now);
+    this.#database.prepare(`
+      UPDATE creative_job_outputs
+      SET status = 'skipped', error = 'Skipped because the server restarted before this variant was submitted.', updated_at = ?
+      WHERE status = 'queued'
+    `).run(now);
+    this.#database.prepare(`
+      UPDATE creative_image_jobs
+      SET status = 'uncertain', error = 'Generation was interrupted by a server restart. Review provider status before starting another job.', updated_at = ?
+      WHERE status IN ('submitting', 'generating') AND visual_mode = 'shared'
+    `).run(now);
+    this.#database.prepare(`
+      UPDATE creative_image_jobs
+      SET status = CASE
+            WHEN EXISTS (SELECT 1 FROM creative_job_outputs o WHERE o.job_id = creative_image_jobs.id AND o.status = 'uncertain') THEN 'uncertain'
+            WHEN NOT EXISTS (SELECT 1 FROM creative_job_outputs o WHERE o.job_id = creative_image_jobs.id AND o.status <> 'ready') THEN 'ready'
+            ELSE 'failed'
+          END,
+          error = CASE
+            WHEN EXISTS (SELECT 1 FROM creative_job_outputs o WHERE o.job_id = creative_image_jobs.id AND o.status = 'uncertain')
+              THEN 'Generation was interrupted by a server restart. Review provider status before starting another job.'
+            WHEN NOT EXISTS (SELECT 1 FROM creative_job_outputs o WHERE o.job_id = creative_image_jobs.id AND o.status <> 'ready') THEN NULL
+            ELSE 'Generation was interrupted before every variant completed.'
+          END,
+          updated_at = ?
+      WHERE visual_mode = 'distinct' AND status IN ('submitting', 'generating')
+    `).run(now);
+  }
+
+  setCustomPersonas(campaignId: string, personas: Campaign['customPersonas'], now: string): Campaign | undefined {
+    this.#database.prepare('UPDATE campaigns SET custom_personas = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(personas), now, campaignId);
+    return this.getCampaign(campaignId);
   }
 
   setHeadlines(campaignId: string, headlines: string[], now: string): Campaign | undefined {
@@ -533,6 +656,7 @@ interface CampaignRow {
   agent_count: number;
   concurrency: number;
   headlines: string;
+  custom_personas: string;
   created_at: string;
   updated_at: string;
 }
@@ -634,6 +758,25 @@ interface CreativeJobRow {
   content_type: 'image/png' | 'image/jpeg' | 'image/webp' | 'video/mp4' | null;
   created_at: string;
   updated_at: string;
+  visual_mode: 'shared' | 'distinct';
+}
+
+interface CreativeOutputRow {
+  id: string;
+  job_id: string;
+  output_index: number;
+  headline: string;
+  image_prompt: string;
+  status: CreativeVariantOutputStatus;
+  image_url: string | null;
+  video_url: string | null;
+  error: string | null;
+  provider_task_id: string | null;
+  polling_url: string | null;
+  content_type: 'image/png' | 'image/jpeg' | 'image/webp' | 'video/mp4' | null;
+  created_at: string;
+  updated_at: string;
+  parent_media_type: 'image' | 'video';
 }
 
 function toCampaign(row: CampaignRow): Campaign {
@@ -651,6 +794,7 @@ function toCampaign(row: CampaignRow): Campaign {
     agentCount: row.agent_count ?? DEFAULT_AGENT_COUNT,
     concurrency: row.concurrency ?? DEFAULT_CONCURRENCY,
     headlines: JSON.parse(row.headlines || '[]') as string[],
+    customPersonas: JSON.parse(row.custom_personas || '[]') as Campaign['customPersonas'],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -745,11 +889,10 @@ function toAgentJob(row: AgentJobRow): AgentJob {
 }
 
 function toCreativeJob(row: CreativeJobRow): CreativeImageJob {
-  const { id, campaignId, headlines, imagePrompt, mediaType, status, imageUrl, videoUrl, videoOptions, error, providerTaskId, createdAt, updatedAt } = toStoredCreativeJob(row);
-  return { id, campaignId, headlines, imagePrompt, mediaType, status, imageUrl, videoUrl, videoOptions, error, providerTaskId, createdAt, updatedAt };
+  return publicCreativeJob(toStoredCreativeJob(row, []));
 }
 
-function toStoredCreativeJob(row: CreativeJobRow): StoredCreativeImageJob {
+function toStoredCreativeJob(row: CreativeJobRow, outputs: StoredCreativeVariantOutput[]): StoredCreativeImageJob {
   return {
     id: row.id,
     campaignId: row.campaign_id,
@@ -770,5 +913,46 @@ function toStoredCreativeJob(row: CreativeJobRow): StoredCreativeImageJob {
     contentType: row.content_type,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    visualMode: row.visual_mode,
+    outputs,
+  };
+}
+
+function toCreativeOutput(row: CreativeOutputRow): StoredCreativeVariantOutput {
+  return {
+    id: row.id,
+    index: row.output_index,
+    headline: row.headline,
+    imagePrompt: row.image_prompt,
+    status: row.status,
+    imageUrl: row.image_url,
+    videoUrl: row.video_url,
+    error: row.error,
+    providerTaskId: row.provider_task_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    pollingUrl: row.polling_url,
+    contentType: row.content_type,
+    mediaType: row.parent_media_type,
+  };
+}
+
+function publicCreativeJob(job: StoredCreativeImageJob): CreativeImageJob {
+  return {
+    id: job.id,
+    campaignId: job.campaignId,
+    headlines: job.headlines,
+    imagePrompt: job.imagePrompt,
+    mediaType: job.mediaType,
+    status: job.status,
+    imageUrl: job.imageUrl,
+    videoUrl: job.videoUrl,
+    videoOptions: job.videoOptions,
+    error: job.error,
+    providerTaskId: job.providerTaskId,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    outputs: job.outputs.map(({ pollingUrl: _pollingUrl, contentType: _contentType, mediaType: _mediaType, ...output }) => output),
+    visualMode: job.visualMode,
   };
 }

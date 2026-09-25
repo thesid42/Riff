@@ -170,6 +170,104 @@ describe('persona wave', () => {
     expect(liquid.proposeExperimentWithMetadata).not.toHaveBeenCalled();
   });
 
+  it('saves a custom persona on the draft', async () => {
+    const created = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Bottle', product: 'Bottle', audience: 'Commuters', approvedClaims: ['750 ml'], budgetCents: 5000 },
+    });
+    const id = created.json().campaign.id as string;
+    const added = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/personas`,
+      payload: { ageBand: '25-34', work: 'specialist', job: 'dentist', country: 'Spain', location: 'Madrid', language: 'Spanish', device: 'phone', household: 'partner' },
+    });
+    expect(added.statusCode).toBe(200);
+    expect(added.json().persona.custom).toBe(true);
+    expect(added.json().campaign.customPersonas).toHaveLength(1);
+    expect(added.json().campaign.customPersonas[0].location).toBe('Madrid');
+  });
+
+  it('maps an explicitly selected creative batch to exact headline order and leaves later unselected waves text-only', async () => {
+    await app.close();
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const prompts = ['Bottle on a work desk.', 'Bottle by a commuter tote.'];
+    const bfl = {
+      submit: vi.fn(async (prompt: string) => ({ id: `task-${prompts.indexOf(prompt)}`, pollingUrl: `https://api.bfl.ai/v1/get_result?id=${prompts.indexOf(prompt)}` })),
+      poll: vi.fn(async () => ({ status: 'Ready', downloadImage: async () => ({ bytes: png, contentType: 'image/png' as const }) })),
+    };
+    const analytics = mockAnalytics();
+    const liquid = mockLiquid();
+    app = createApp({
+      databasePath: join(directory, 'campaigns.sqlite'),
+      assetDir: join(directory, 'creative-assets'),
+      providers: { liquid: liquid as never, analytics, bfl: bfl as never, videoEnabled: false },
+    });
+    const created = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Bottle', product: 'Steel bottle', audience: 'Commuters', approvedClaims: ['750 ml'], budgetCents: 5000 },
+    });
+    const campaignId = created.json().campaign.id as string;
+    const headlines = ['Carry water with ease', 'A bottle for your workday'];
+    await app.inject({ method: 'POST', url: `/api/campaigns/${campaignId}/headlines`, payload: { headlines } });
+    const creative = await app.inject({
+      method: 'POST', url: `/api/campaigns/${campaignId}/creative/images`,
+      payload: {
+        requestId: '44444444-4444-4444-8444-444444444444', headlines,
+        imagePrompt: 'A clean product photograph of a steel bottle.', variantPrompts: prompts,
+      },
+    });
+    expect(creative.statusCode).toBe(202);
+    await vi.waitFor(async () => {
+      const listed = await app.inject({ method: 'GET', url: `/api/campaigns/${campaignId}/creative` });
+      expect(listed.json().jobs[0].status).toBe('ready');
+    });
+    const job = (await app.inject({ method: 'GET', url: `/api/campaigns/${campaignId}/creative` })).json().jobs[0];
+
+    const wrongOrder = await app.inject({
+      method: 'POST', url: `/api/campaigns/${campaignId}/run`,
+      payload: { creativeJobId: job.id, headlines: [...headlines].reverse(), agentCount: 8 },
+    });
+    expect(wrongOrder.statusCode).toBe(409);
+    expect(wrongOrder.json().error.code).toBe('creative_headlines_mismatch');
+
+    const otherCampaign = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Other', product: 'Other product', audience: 'Commuters', approvedClaims: [], budgetCents: 5000 },
+    });
+    const foreignJob = await app.inject({
+      method: 'POST', url: `/api/campaigns/${otherCampaign.json().campaign.id}/run`,
+      payload: { creativeJobId: job.id, headlines, agentCount: 8 },
+    });
+    expect(foreignJob.statusCode).toBe(409);
+    expect(foreignJob.json().error.code).toBe('creative_job_mismatch');
+
+    const started = await app.inject({
+      method: 'POST', url: `/api/campaigns/${campaignId}/run`,
+      payload: { creativeJobId: job.id, headlines, agentCount: 8, concurrency: 2 },
+    });
+    expect(started.statusCode).toBe(200);
+    const selected = await app.inject({ method: 'GET', url: `/api/campaigns/${campaignId}` });
+    const firstExperimentId = selected.json().wave.experimentId;
+    expect(selected.json().variants.filter((variant: { experimentId: string }) => variant.experimentId === firstExperimentId)
+      .map((variant: { imageUrl: string | null }) => variant.imageUrl)).toEqual(job.outputs.map((output: { imageUrl: string }) => output.imageUrl));
+    expect(selected.json().experiments[0].hypothesis).toContain('complete campaign concepts');
+    await vi.waitFor(async () => {
+      const wave = await app.inject({ method: 'GET', url: `/api/campaigns/${campaignId}/wave` });
+      expect(wave.json().wave.runtime).toBe('idle');
+    }, { timeout: 5_000 });
+
+    const textOnly = await app.inject({
+      method: 'POST', url: `/api/campaigns/${campaignId}/run`,
+      payload: { headlines, agentCount: 8, concurrency: 2 },
+    });
+    expect(textOnly.statusCode).toBe(200);
+    const secondDetails = await app.inject({ method: 'GET', url: `/api/campaigns/${campaignId}` });
+    const secondExperimentId = secondDetails.json().wave.experimentId;
+    expect(secondDetails.json().variants.filter((variant: { experimentId: string }) => variant.experimentId === secondExperimentId)
+      .map((variant: { imageUrl: string | null; videoUrl: string | null }) => [variant.imageUrl, variant.videoUrl]))
+      .toEqual([[null, null], [null, null]]);
+    expect(bfl.submit).toHaveBeenCalledTimes(2);
+  });
+
   it('refuses a wave when Liquid or analytics is missing', async () => {
     await app.close();
     app = createApp({ databasePath: join(directory, 'campaigns.sqlite'), providers: { videoEnabled: false } });
