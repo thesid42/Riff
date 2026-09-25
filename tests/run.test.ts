@@ -46,6 +46,7 @@ function mockAnalytics(): AnalyticsClient {
     provider: 'rawtree',
     ingest: vi.fn(async (events) => events.length),
     query: vi.fn(async () => []),
+    querySeries: vi.fn(async () => []),
   };
 }
 

@@ -21,6 +21,12 @@ interface CampaignDetails {
   wave?: WaveSnapshot;
 }
 
+interface RoundMetrics {
+  round: number;
+  experiment: Experiment;
+  metrics: MetricsSnapshot;
+}
+
 interface ApiError extends Error {
   status?: number;
 }
@@ -89,6 +95,7 @@ export default function App() {
   const [listRetry, setListRetry] = useState(0);
   const [details, setDetails] = useState<CampaignDetails | null>(null);
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
+  const [rounds, setRounds] = useState<RoundMetrics[]>([]);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [metricsLoading, setMetricsLoading] = useState(false);
   const [detailsError, setDetailsError] = useState('');
@@ -147,6 +154,7 @@ export default function App() {
     if (!selectedId) {
       setDetails(null);
       setMetrics(null);
+      setRounds([]);
       setDetailsError('');
       setMetricsError('');
       setDetailsLoading(false);
@@ -156,6 +164,7 @@ export default function App() {
     const controller = new AbortController();
     setDetails(null);
     setMetrics(null);
+    setRounds([]);
     setDetailsLoading(true);
     setMetricsLoading(true);
     setDetailsError('');
@@ -176,6 +185,13 @@ export default function App() {
         if (!controller.signal.aborted) setMetricsError(error instanceof Error ? error.message : 'Metrics could not be loaded.');
       })
       .finally(() => { if (!controller.signal.aborted) setMetricsLoading(false); });
+
+    // Per-round metrics power one chart per experiment version.
+    getJson<{ rounds: RoundMetrics[] }>(`/api/campaigns/${encodeURIComponent(selectedId)}/metrics/rounds`, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) setRounds(Array.isArray(result?.rounds) ? result.rounds : []);
+      })
+      .catch(() => { if (!controller.signal.aborted) setRounds([]); });
     return () => controller.abort();
   }, [selectedId, campaignRetry]);
 
@@ -298,6 +314,7 @@ export default function App() {
                 campaign={activeCampaign}
                 details={details?.campaign.id === selectedId ? details : null}
                 metrics={metrics?.campaignId === selectedId ? metrics : null}
+                rounds={rounds}
                 listLoading={listLoading}
                 listError={listError}
                 detailsLoading={detailsLoading}
@@ -345,12 +362,13 @@ function LoadingState({ label }: { label: string }) {
 }
 
 function CampaignDashboard({
-  campaign, details, metrics, listLoading, listError, detailsLoading, metricsLoading, detailsError, metricsError, onRetry, onShowMetrics, onCreate, onRetryList,
+  campaign, details, metrics, rounds, listLoading, listError, detailsLoading, metricsLoading, detailsError, metricsError, onRetry, onShowMetrics, onCreate, onRetryList,
   composerHeadlines, onHeadlinesChange, onWave,
 }: {
   campaign: Campaign | null;
   details: CampaignDetails | null;
   metrics: MetricsSnapshot | null;
+  rounds: RoundMetrics[];
   listLoading: boolean;
   listError: string;
   detailsLoading: boolean;
@@ -397,9 +415,35 @@ function CampaignDashboard({
             <div><span className="section-kicker">PERFORMANCE</span><h2 id="chart-title">Sign-ups over time</h2><p>{metrics?.window.label ?? 'Campaign history'}</p></div>
             {series.length > 0 && <span className="chart-legend">By variant</span>}
           </div>
+
+      {rounds.length > 1 && (
+        <section className="panel round-charts" aria-labelledby="rounds-title">
+          <div className="panel-heading">
+            <div><span className="section-kicker">EVERY VERSION</span><h2 id="rounds-title">Results by round</h2><p>Each experiment version, newest first.</p></div>
+            <span className="chart-legend">{`${rounds.length} rounds`}</span>
+          </div>
+          <div className="round-chart-grid">
+            {rounds.map((entry) => (
+              <article className="round-chart" key={entry.experiment.id}>
+                <div className="round-chart-head">
+                  <div className="round-chart-title">
+                    <strong>{`Round ${entry.round}`}</strong>
+                    <span className={`round-badge round-${entry.experiment.status}`}>{humanizeStatus(entry.experiment.status)}</span>
+                  </div>
+                  <span className="round-chart-meta">{`${count(entry.metrics.totals.signups)} sign-ups · ${count(entry.metrics.totals.clicks)} clicks · ${count(entry.metrics.totals.impressions)} views`}</span>
+                  <span className="round-chart-hypothesis">{entry.experiment.hypothesis || 'No hypothesis recorded'}</span>
+                </div>
+                <SignupChart series={entry.metrics.series} variants={variants} loading={false} />
+                <div className="chart-footnote"><span>{entry.metrics.source !== 'none' ? `Source: ${humanizeStatus(entry.metrics.source)}` : 'No analytics collected'}</span><span>{displayTime(entry.experiment.windowStart) ?? '—'}</span></div>
+              </article>
+            ))}
+          </div>
+        </section>
+      )}
           <SignupChart series={series} variants={variants} loading={metricsLoading} />
           <div className="chart-footnote"><span>{metrics?.source && metrics.source !== 'none' ? `Source: ${humanizeStatus(metrics.source)}` : 'No analytics collected'}</span><span>{updatedAt ? `Updated ${updatedAt}` : 'Waiting for data'}</span></div>
         </section>
+
 
         <section className="next-panel" aria-labelledby="next-title">
           <div className="next-topline"><span className="next-icon"><Sprout size={19} /></span><span className="section-kicker">CAMPAIGN STATUS</span></div>
@@ -407,6 +451,12 @@ function CampaignDashboard({
           <p>{listError ? 'Retry the campaign list before creating a new draft, so existing work stays easy to find.' : campaign ? 'The product, audience, approved claims, and budget are saved. Results will appear when campaign activity is available.' : listLoading ? 'The workspace is checking for drafts saved on this device.' : 'Add a product, audience, approved claims, and demo budget to create a draft.'}</p>
           <div className="next-divider" />
           {listError ? <button type="button" className="button button-secondary" onClick={onRetryList}>Retry campaign list <ArrowRight size={15} /></button> : campaign ? <div className="next-bottom"><span className="status-pill"><span className="status-dot" /> Draft</span><span>{details?.wave?.runtime === 'running' ? 'Persona wave running' : detailsLoading ? 'Loading campaign' : details?.wave?.progress.total ? `${details.wave.progress.succeeded} judged` : 'No activity started'}</span></div> : <button type="button" className="button button-primary" onClick={onCreate} disabled={listLoading}><Plus size={16} /> Create campaign draft</button>}
+          {details?.wave?.loopStatus && (
+            <p className={`loop-status loop-${details.wave.loopStatus.reason}`} role="status">
+              {details.wave.loopStatus.message}
+              {details.wave.loopStatus.bestClickRate != null && ` Best click rate ${percent(details.wave.loopStatus.bestClickRate)} against a ${percent(details.wave.loopStatus.threshold)} threshold, measured from ${humanizeStatus(details.wave.loopStatus.metricsSource)}.`}
+            </p>
+          )}
           {metrics?.message && <p className="source-message">{metrics.message}</p>}
         </section>
       </div>

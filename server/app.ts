@@ -8,9 +8,16 @@ import {
 import { persistHeadlinesSchema, runWaveSchema } from '../shared/run.js';
 import { creativeImageRequestSchema, creativeVideoRequestSchema } from '../shared/creative.js';
 import { CampaignDatabase } from './database.js';
-import { createProviders, getIntegrationStatuses, type Providers } from './providers/index.js';
+import { createProviders, getIntegrationStatuses, readMaxAutoRounds, readSuccessClickRate, type Providers } from './providers/index.js';
 import { CreativeService, CreativeServiceError } from './creative.js';
 import { ExperimentRunService, RunServiceError } from './experiment-run.js';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** Resolves once every detached media job has settled. */
+    waitForCreativeIdle(): Promise<void>;
+  }
+}
 
 export interface CreateAppOptions {
   databasePath?: string;
@@ -19,6 +26,8 @@ export interface CreateAppOptions {
   providers?: Partial<Pick<Providers, 'liquid' | 'analytics' | 'bfl' | 'video' | 'videoEnabled'>>;
   bflModel?: string;
   bflVideoModel?: string;
+  successClickRate?: number;
+  maxAutoRounds?: number;
 }
 
 export function createApp(options: CreateAppOptions = {}): FastifyInstance {
@@ -39,6 +48,8 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     database,
     liquid: providers.liquid,
     analytics: providers.analytics,
+    successClickRate: options.successClickRate ?? readSuccessClickRate(),
+    maxAutoRounds: options.maxAutoRounds ?? readMaxAutoRounds(),
   });
   database.markInterruptedCreativeJobs(new Date().toISOString());
   runner.recover();
@@ -113,6 +124,12 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     const campaign = database.getCampaign(request.params.id);
     if (!campaign) return notFound(reply, 'Campaign');
     return runner.metrics(campaign);
+  });
+
+  app.get<{ Params: { id: string } }>('/api/campaigns/:id/metrics/rounds', async (request, reply) => {
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    return { rounds: await runner.rounds(campaign) };
   });
 
   app.get<{ Params: { id: string } }>('/api/campaigns/:id/wave', async (request, reply) => {
@@ -253,6 +270,9 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     const safeError = clientErrors[statusCode] ?? { code: 'internal_error', message: 'The request could not be completed.' };
     return reply.code(statusCode).send({ error: safeError });
   });
+
+  // Media jobs run detached from their HTTP request, so tests need a way to await them.
+  app.decorate('waitForCreativeIdle', () => creative.waitForIdle());
 
   app.addHook('preClose', async () => {
     await runner.close();

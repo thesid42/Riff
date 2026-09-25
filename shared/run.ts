@@ -133,6 +133,21 @@ export interface WaveSnapshot {
   lastError: string | null;
   ingestError: string | null;
   reviewError: string | null;
+  /** Why the auto-run loop stopped, so the UI can explain it instead of going quiet. */
+  loopStatus: LoopStatus | null;
+}
+
+export type LoopStopReason = 'threshold_met' | 'round_cap' | 'liquid_wait' | 'paused' | 'review_failed';
+
+export interface LoopStatus {
+  reason: LoopStopReason;
+  round: number;
+  maxRounds: number;
+  message: string;
+  /** Best observed click rate and the metrics source it was judged from. */
+  bestClickRate: number | null;
+  threshold: number;
+  metricsSource: 'rawtree' | 'tinybird' | 'sqlite' | 'none';
 }
 
 export function emptyWaveProgress(): WaveProgress {
@@ -153,6 +168,7 @@ export function emptyWaveSnapshot(agentCount = DEFAULT_AGENT_COUNT, concurrency 
     lastError: null,
     ingestError: null,
     reviewError: null,
+    loopStatus: null,
   };
 }
 

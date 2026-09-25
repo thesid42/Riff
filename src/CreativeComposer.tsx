@@ -169,10 +169,31 @@ function sameDraft(job: CreativeImageJob, headlines: string[], imagePrompt: stri
 
 function variantLabel(index: number): string { return String.fromCharCode(65 + index); }
 
+// Slightly above the server-side job timeouts (120s image / 300s video) so the
+// server reports its own outcome before the client gives up waiting.
+const IMAGE_DEADLINE_MS = 130_000;
+const VIDEO_DEADLINE_MS = 310_000;
+const GENERATION_POLL_MS = 2_000;
+
+function isTerminalStatus(status: CreativeImageJob['status']): boolean {
+  return status === 'ready' || status === 'failed' || status === 'uncertain';
+}
+
+function waitFor(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const timer = window.setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+    function onAbort() { window.clearTimeout(timer); reject(signal.reason); }
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
 export default function CreativeComposer({ campaign, onHeadlinesChange }: { campaign: Campaign; onHeadlinesChange?: (headlines: string[]) => void }) {
   const [campaignStates, setCampaignStates] = useState<Record<string, ComposerState>>({});
   const [viewer, setViewer] = useState<ViewerItem | null>(null);
   const planControllers = useRef(new Map<string, AbortController>());
+  const generationControllers = useRef(new Map<string, AbortController>());
+  const refreshControllers = useRef(new Map<string, AbortController>());
   const state = campaignStates[campaign.id] ?? EMPTY_STATE;
   const updateCampaign = (campaignId: string, update: (current: ComposerState) => ComposerState) => {
     setCampaignStates((previous) => ({ ...previous, [campaignId]: update(previous[campaignId] ?? EMPTY_STATE) }));
@@ -260,14 +281,20 @@ export default function CreativeComposer({ campaign, onHeadlinesChange }: { camp
   async function refreshJobs() {
     const campaignId = campaign.id;
     const controller = new AbortController();
+    // Supersede any in-flight reload so overlapping clicks cannot apply out of order.
+    refreshControllers.current.get(campaignId)?.abort();
+    refreshControllers.current.set(campaignId, controller);
     updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'loading', loadError: '' }));
     try {
-    const result = await getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities> }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal);
+      const result = await getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities> }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal);
       if (typeof result?.imagePromptSuggestion !== 'string' || !Array.isArray(result.jobs)) throw new Error('Creative settings could not be read.');
       const jobs = result.jobs.filter((job) => isCreativeJob(job, campaignId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'ready', loadError: '', imagePromptSuggestion: result.imagePromptSuggestion, imagePrompt: current.promptEdited ? current.imagePrompt : result.imagePromptSuggestion, jobs, capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true } }));
     } catch (error) {
+      if (controller.signal.aborted) return;
       updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'error', loadError: error instanceof Error ? error.message : 'Creative drafts could not be loaded.' }));
+    } finally {
+      if (refreshControllers.current.get(campaignId) === controller) refreshControllers.current.delete(campaignId);
     }
   }
 
@@ -284,20 +311,46 @@ export default function CreativeComposer({ campaign, onHeadlinesChange }: { camp
     }
     const requestId = createOrReuseRequestId(campaignId, requestFingerprint);
     updateCampaign(campaignId, (current) => ({ ...current, generationLoading: true, generationError: '' }));
+    const deadlineMs = mediaType === 'video' ? VIDEO_DEADLINE_MS : IMAGE_DEADLINE_MS;
+    const controller = new AbortController();
+    generationControllers.current.get(campaignId)?.abort();
+    generationControllers.current.set(campaignId, controller);
+    const timeout = AbortSignal.timeout(deadlineMs);
+    const combined = AbortSignal.any([controller.signal, timeout]);
+    const mergeJob = (job: CreativeImageJob, done: boolean) => {
+      updateCampaign(campaignId, (current) => ({
+        ...current,
+        generationLoading: !done,
+        generationError: done ? job.error ?? '' : current.generationError,
+        jobs: [job, ...current.jobs.filter((existing) => existing.id !== job.id)].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+      }));
+    };
     try {
       const path = mediaType === 'video' ? 'videos' : 'images';
       const body = mediaType === 'video' ? { requestId, headlines, imagePrompt, videoOptions: state.videoOptions } : { requestId, headlines, imagePrompt };
-      const result = await postJson<{ job: CreativeImageJob }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative/${path}`, body);
+      const result = await postJson<{ job: CreativeImageJob }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative/${path}`, body, combined);
       if (!isCreativeJob(result?.job, campaignId)) throw new Error('The creative request returned an invalid job. Refresh saved drafts before trying again.');
-      updateCampaign(campaignId, (current) => ({
-        ...current,
-        generationLoading: false,
-        generationError: result.job.error ?? '',
-        jobs: [result.job, ...current.jobs.filter((job) => job.id !== result.job.id)].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-      }));
-      if (result.job.status === 'ready') clearStoredRequest(campaignId, requestFingerprint, requestId);
+
+      // The server runs the job detached, so a non-terminal status means we poll for the outcome.
+      let job = result.job;
+      mergeJob(job, isTerminalStatus(job.status));
+      while (!isTerminalStatus(job.status)) {
+        await waitFor(GENERATION_POLL_MS, combined);
+        const snapshot = await getJson<{ jobs: CreativeImageJob[] }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, combined);
+        const found = Array.isArray(snapshot?.jobs) ? snapshot.jobs.find((item) => isCreativeJob(item, campaignId) && item.id === job.id) : undefined;
+        if (!found) throw new Error('The creative job could not be found. Reload saved jobs to check its status.');
+        job = found;
+        mergeJob(job, isTerminalStatus(job.status));
+      }
+      if (job.status === 'ready') clearStoredRequest(campaignId, requestFingerprint, requestId);
     } catch (error) {
-      updateCampaign(campaignId, (current) => ({ ...current, generationLoading: false, generationError: error instanceof Error ? error.message : 'The creative request did not return a result. Reuse the same request to check its status.' }));
+      const message = combined.aborted && timeout.aborted
+        ? 'Generation is taking longer than expected. Reload saved jobs to check whether it finished.'
+        : error instanceof Error ? error.message : 'The creative request did not return a result. Reuse the same request to check its status.';
+      if (controller.signal.aborted && !timeout.aborted) return;
+      updateCampaign(campaignId, (current) => ({ ...current, generationLoading: false, generationError: message }));
+    } finally {
+      if (generationControllers.current.get(campaignId) === controller) generationControllers.current.delete(campaignId);
     }
   }
 

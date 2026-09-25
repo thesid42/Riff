@@ -5,13 +5,15 @@ import {
   headlineSetSchema,
   type AgentJob,
   type DecisionRecord,
+  type LoopStatus,
+  type LoopStopReason,
   type RunWaveInput,
   type WaveSnapshot,
 } from '../shared/run.js';
 import type { Campaign, Experiment, Lesson, MetricsSnapshot, Variant } from '../shared/types.js';
 import { emptyMetricsSnapshot } from '../shared/types.js';
 import type { CampaignDatabase } from './database.js';
-import { ProviderError, type AnalyticsClient, type AnalyticsEvent, type LiquidClient } from './providers/index.js';
+import { DEFAULT_MAX_AUTO_ROUNDS, DEFAULT_SUCCESS_CLICK_RATE, ProviderError, type AnalyticsClient, type AnalyticsEvent, type LiquidClient } from './providers/index.js';
 import { deciderSpeed, eventCost, jobProgress, lastJobError, segmentMetrics, signupSeries, totalsFromJobs, variantTotals } from './wave-metrics.js';
 
 export class RunServiceError extends Error {
@@ -25,6 +27,10 @@ export interface ExperimentRunOptions {
   database: CampaignDatabase;
   liquid?: Pick<LiquidClient, 'judgeCreative' | 'proposeExperimentWithMetadata'>;
   analytics?: AnalyticsClient;
+  /** Click rate at which the loop stops early. Defaults to SUCCESS_CLICK_RATE_THRESHOLD. */
+  successClickRate?: number;
+  /** Upper bound on automatically chained waves. */
+  maxAutoRounds?: number;
 }
 
 const INGEST_BATCH = 50;
@@ -34,6 +40,11 @@ export class ExperimentRunService {
   private readonly workers = new Map<string, { stop: boolean; inflight: Set<Promise<void>> }>();
   private readonly ingestErrors = new Map<string, string>();
   private readonly reviewErrors = new Map<string, string>();
+  private readonly loopStatuses = new Map<string, LoopStatus>();
+  /** Media carried into each chained round so every wave shares the approved creative. */
+  private readonly loopMedia = new Map<string, { imageUrl: string | null; videoUrl: string | null }>();
+  /** Timers for chained rounds that have not started yet, so shutdown can cancel them. */
+  private readonly pendingRounds = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(private readonly options: ExperimentRunOptions) {}
 
@@ -53,6 +64,7 @@ export class ExperimentRunService {
       lastError: lastJobError(jobs),
       ingestError: this.ingestErrors.get(campaign.id) ?? null,
       reviewError: this.reviewErrors.get(campaign.id) ?? null,
+      loopStatus: this.loopStatuses.get(campaign.id) ?? null,
     };
   }
 
@@ -74,15 +86,85 @@ export class ExperimentRunService {
     };
   }
 
-  metrics(campaign: Campaign): MetricsSnapshot {
+  async metrics(campaign: Campaign): Promise<MetricsSnapshot> {
     const experiment = this.options.database.latestExperiment(campaign.id);
-    const jobs = experiment ? this.options.database.listAgentJobs(campaign.id, experiment.id) : [];
+    if (!experiment) return emptyMetricsSnapshot(campaign.id);
+    return this.metricsForExperiment(campaign, experiment);
+  }
+
+  /** Metrics for every round of a campaign, newest first, so the UI can chart each version. */
+  async rounds(campaign: Campaign): Promise<Array<{ round: number; experiment: Experiment; metrics: MetricsSnapshot }>> {
+    const experiments = this.options.database.listExperiments(campaign.id);
+    const ordered = [...experiments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const results = await Promise.all(ordered.map(async (experiment, index) => ({
+      round: index + 1,
+      experiment,
+      metrics: await this.metricsForExperiment(campaign, experiment),
+    })));
+    return results.reverse();
+  }
+
+  /**
+   * Reads one experiment's results from analytics, falling back to the locally recorded jobs.
+   * `source` always names the path that produced the numbers, so a silent fallback stays visible.
+   */
+  private async metricsForExperiment(campaign: Campaign, experiment: Experiment): Promise<MetricsSnapshot> {
+    const jobs = this.options.database.listAgentJobs(campaign.id, experiment.id);
+    const local = this.localMetrics(campaign, experiment, jobs);
+    const analytics = this.options.analytics;
+    if (!analytics || !experiment.windowStart) return local;
+    try {
+      const window = { start: experiment.windowStart, end: experiment.windowEnd ?? new Date().toISOString() };
+      const query = {
+        campaignId: campaign.id,
+        experimentId: experiment.id,
+        start: new Date(window.start).toISOString(),
+        end: new Date(window.end).toISOString(),
+      };
+      const [rows, series] = await Promise.all([analytics.query(query), analytics.querySeries(query)]);
+      if (rows.length === 0) return local;
+      const variants = rows.map((row) => ({
+        variantId: row.variantId,
+        totals: {
+          impressions: row.impressions,
+          uniqueVisitors: row.uniqueVisitors,
+          clicks: row.clicks,
+          signups: row.signups,
+          spendCents: row.spendCents,
+        },
+      }));
+      const totals = variants.reduce((sum, item) => ({
+        impressions: sum.impressions + item.totals.impressions,
+        uniqueVisitors: sum.uniqueVisitors + item.totals.uniqueVisitors,
+        clicks: sum.clicks + item.totals.clicks,
+        signups: sum.signups + item.totals.signups,
+        spendCents: sum.spendCents + item.totals.spendCents,
+      }), { impressions: 0, uniqueVisitors: 0, clicks: 0, signups: 0, spendCents: 0 });
+      return {
+        ...local,
+        source: analytics.provider,
+        status: 'available',
+        totals,
+        variants,
+        // The series pipe is optional; keep the locally derived line when it returns nothing.
+        series: series.length ? series : local.series,
+        message: `Results read from ${analytics.provider}.`,
+      };
+    } catch (error) {
+      return {
+        ...local,
+        message: `${local.message} Analytics read failed, so these numbers come from local judgments: ${error instanceof Error ? error.message : 'unknown error'}`,
+      };
+    }
+  }
+
+  private localMetrics(campaign: Campaign, experiment: Experiment | null, jobs: AgentJob[]): MetricsSnapshot {
     if (jobs.length === 0) return emptyMetricsSnapshot(campaign.id);
     const succeeded = jobs.filter((job) => job.status === 'succeeded');
     const decide = succeeded.map((job) => job.elapsedMs).filter((value): value is number => value != null);
     return {
       campaignId: campaign.id,
-      source: this.options.analytics?.provider ?? 'none',
+      source: 'sqlite',
       status: succeeded.length ? 'available' : 'not_started',
       window: { label: experiment ? 'Current wave' : 'All time', start: experiment?.windowStart ?? null, end: experiment?.windowEnd ?? null },
       updatedAt: succeeded.at(-1)?.finishedAt ?? null,
@@ -108,6 +190,9 @@ export class ExperimentRunService {
     if (campaign.runtime === 'running') throw new RunServiceError(409, 'wave_active', 'This draft already has a persona wave running.');
     const headlines = headlineSetSchema.safeParse(input.headlines?.length ? input.headlines : campaign.headlines);
     if (!headlines.success) throw new RunServiceError(400, 'headlines_required', 'Ask Liquid for headlines, or enter 2 or 3 unique headlines, before starting a wave.');
+    // A manual start begins a fresh loop: clear the previous stop reason and carry the media forward.
+    this.loopStatuses.delete(campaign.id);
+    this.loopMedia.set(campaign.id, media);
     const now = new Date().toISOString();
     this.options.database.setHeadlines(campaign.id, headlines.data, now);
     const experiment = this.options.database.createExperiment({
@@ -175,6 +260,18 @@ export class ExperimentRunService {
     if (campaign.runtime !== 'running') throw new RunServiceError(409, 'wave_not_running', 'There is no running wave to pause.');
     const worker = this.workers.get(campaign.id);
     if (worker) worker.stop = true;
+    const pending = this.pendingRounds.get(campaign.id);
+    if (pending) { clearTimeout(pending); this.pendingRounds.delete(campaign.id); }
+    // A manual pause ends the automatic loop; scheduleNextRound also re-checks runtime.
+    this.loopStatuses.set(campaign.id, {
+      reason: 'paused',
+      round: this.options.database.listExperiments(campaign.id).length,
+      maxRounds: this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS,
+      message: 'The wave was paused, so the automatic loop stopped.',
+      bestClickRate: null,
+      threshold: this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE,
+      metricsSource: 'none',
+    });
     this.options.database.setRuntime(campaign.id, 'paused', campaign.agentCount, campaign.concurrency, new Date().toISOString());
     return this.snapshot(this.options.database.getCampaign(campaign.id)!);
   }
@@ -192,6 +289,8 @@ export class ExperimentRunService {
   }
 
   async close(): Promise<void> {
+    for (const timer of this.pendingRounds.values()) clearTimeout(timer);
+    this.pendingRounds.clear();
     for (const worker of this.workers.values()) worker.stop = true;
     await Promise.all([...this.workers.values()].flatMap((worker) => [...worker.inflight]));
     this.workers.clear();
@@ -319,6 +418,23 @@ export class ExperimentRunService {
     this.options.database.setRuntime(campaignId, 'idle', campaign.agentCount, campaign.concurrency, now);
     if (!this.options.liquid || succeeded === 0) return;
     this.reviewErrors.delete(campaignId);
+
+    // Step 5 feeding step 6: judge the round against the configured success threshold using the
+    // same metrics the dashboard shows, and record which source decided it.
+    const round = this.options.database.listExperiments(campaignId).length;
+    const maxRounds = this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS;
+    const threshold = this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE;
+    const measured = await this.metricsForExperiment(campaign, { ...experiment, windowEnd: experiment.windowEnd ?? now });
+    const bestClickRate = bestVariantClickRate(measured);
+    const stop = (reason: LoopStopReason, message: string) => {
+      this.loopStatuses.set(campaignId, {
+        reason, round, maxRounds, message, bestClickRate, threshold, metricsSource: measured.source === 'none' ? 'none' : measured.source,
+      });
+    };
+
+    // The threshold decides whether to chain another round, not whether to review. Step 6 always
+    // runs so the decision and lesson are recorded for this round either way.
+    const thresholdMet = bestClickRate != null && bestClickRate >= threshold;
     const segments = segmentMetrics(jobs);
     const evidence = segments.map((segment, index) => ({
       id: `SEG-${String(index + 1).padStart(2, '0')}`,
@@ -354,13 +470,79 @@ export class ExperimentRunService {
         status: 'active',
         createdAt: decision.createdAt,
       });
-      if (result.decision.action === 'propose_test') {
-        this.options.database.setHeadlines(campaignId, result.decision.headlines, decision.createdAt);
+      if (thresholdMet) {
+        stop('threshold_met', `A variant reached a ${((bestClickRate ?? 0) * 100).toFixed(1)}% click rate, meeting the ${(threshold * 100).toFixed(1)}% threshold, so the loop stopped.`);
+        return;
       }
+      if (result.decision.action !== 'propose_test') {
+        stop('liquid_wait', 'Liquid asked to keep collecting evidence instead of proposing a new test, so the loop stopped.');
+        return;
+      }
+      this.options.database.setHeadlines(campaignId, result.decision.headlines, decision.createdAt);
+      if (round >= maxRounds) {
+        stop('round_cap', `The loop reached its limit of ${maxRounds} rounds. Start another wave manually to continue.`);
+        return;
+      }
+      this.loopStatuses.delete(campaignId);
+      this.scheduleNextRound(campaignId, round);
     } catch (error) {
-      this.reviewErrors.set(campaignId, error instanceof Error ? error.message : 'Campaign review failed.');
+      const message = error instanceof Error ? error.message : 'Campaign review failed.';
+      this.reviewErrors.set(campaignId, message);
+      stop('review_failed', `The review step failed, so the loop stopped: ${message}`);
     }
   }
+
+  /**
+   * Starts the next round once the current worker has unwound.
+   *
+   * finishWave runs inside pump's loop, which only deletes its worker entry in the `finally`
+   * that follows. Calling start() -> pump() from here would hit pump's "already running" guard
+   * and return silently, leaving the jobs enqueued with nothing to process them. Deferring past
+   * the current task lets that `finally` run first.
+   */
+  private scheduleNextRound(campaignId: string, round: number): void {
+    // A microtask is not late enough: microtasks drain before the awaiting caller reaches the
+    // `finally` that removes the worker, so pump() would still see one and refuse. A timer runs
+    // on the macrotask queue, after run() has fully unwound.
+    const timer = setTimeout(() => {
+      this.pendingRounds.delete(campaignId);
+      void (async () => {
+        // Re-read state: the user may have paused, deleted, or restarted in the meantime.
+        const campaign = this.options.database.getCampaign(campaignId);
+        if (!campaign || campaign.runtime !== 'idle') return;
+        if (this.workers.has(campaignId)) return;
+        const media = this.loopMedia.get(campaignId) ?? { imageUrl: null, videoUrl: null };
+        try {
+          await this.start(campaign, {
+            headlines: campaign.headlines,
+            agentCount: campaign.agentCount,
+            concurrency: campaign.concurrency,
+            profileMix: [],
+          }, media);
+        } catch (error) {
+          this.loopStatuses.set(campaignId, {
+            reason: 'review_failed',
+            round,
+            maxRounds: this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS,
+            message: `The next round could not start: ${error instanceof Error ? error.message : 'unknown error'}`,
+            bestClickRate: null,
+            threshold: this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE,
+            metricsSource: 'none',
+          });
+        }
+      })();
+    }, 0);
+    timer.unref?.();
+    this.pendingRounds.set(campaignId, timer);
+  }
+}
+
+/** Highest clicks/impressions across variants, or null when nothing has been measured. */
+function bestVariantClickRate(metrics: MetricsSnapshot): number | null {
+  const rates = metrics.variants
+    .filter((variant) => variant.totals.impressions > 0)
+    .map((variant) => variant.totals.clicks / variant.totals.impressions);
+  return rates.length ? Math.max(...rates) : null;
 }
 
 function eventsForJob(job: AgentJob): AnalyticsEvent[] {

@@ -81,8 +81,10 @@ describe('analytics providers', () => {
     const rows = await client.query(query());
     expect(rows).toEqual([{ variantId, impressions: 4, uniqueVisitors: 3, clicks: 2, signups: 1, spendCents: 4 }]);
     const sql = JSON.parse(String(fixture.calls[0].init.body)).sql as string;
-    expect(sql).toContain("timestamp >= '2026-09-24T10:30:00.000Z'");
-    expect(sql).toContain("timestamp < '2026-09-24T11:00:00.000Z'");
+    // Columns are cast because Rawtree infers them as ClickHouse `Dynamic`, and timestamps are
+    // parsed rather than string-compared because Rawtree stores them without the ISO `T`/`Z`.
+    expect(sql).toContain("parseDateTimeBestEffort(toString(timestamp)) >= parseDateTimeBestEffort('2026-09-24T10:30:00.000Z')");
+    expect(sql).toContain("parseDateTimeBestEffort(toString(timestamp)) < parseDateTimeBestEffort('2026-09-24T11:00:00.000Z')");
     expect(sql).toContain('GROUP BY event_id');
     expect(fixture.calls[0].init.headers).toMatchObject({ 'x-rawtree-database': 'growth' });
 

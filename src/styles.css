@@ -120,6 +120,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .next-divider { height: 1px; margin-top: auto; margin-bottom: 14px; background: #dbe5d9; }
 .next-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: #8a948b; font-size: 10px; }
 .source-message { margin: 9px 0 0 !important; color: #99a29a !important; font-size: 9px !important; line-height: 1.4 !important; }
+.loop-status { margin: 12px 0 0 !important; padding: 9px 11px; border-radius: 8px; border: 1px solid #dbe5d9; background: #f4f8f3; color: #4c5a4e !important; font-size: 10px !important; line-height: 1.5 !important; }
+.loop-status.loop-threshold_met { border-color: #bcd6be; background: #eef6ee; color: #2f5537 !important; }
+.loop-status.loop-review_failed { border-color: #e4cfc6; background: #fbf2ee; color: #7a4a38 !important; }
+
+.round-charts { margin-top: 17px; padding: 20px 21px 18px; }
+.round-chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 18px; margin-top: 16px; }
+.round-chart { display: flex; flex-direction: column; padding: 15px 16px 11px; border: 1px solid #e7eee6; border-radius: 12px; background: #fcfdfb; }
+.round-chart .chart-plot { min-height: 150px; margin-top: 10px; }
+.round-chart .chart-plot > svg { min-height: 142px; }
+.round-chart-head { display: flex; flex-direction: column; gap: 5px; }
+.round-chart-title { display: flex; align-items: center; gap: 8px; }
+.round-chart-title strong { color: #203027; font-size: 13px; letter-spacing: -.25px; }
+.round-badge { padding: 2px 7px; border-radius: 999px; border: 1px solid #dbe5d9; background: #f2f7f1; color: #5d6b5f; font-size: 9px; letter-spacing: .03em; text-transform: uppercase; }
+.round-badge.round-completed { border-color: #bcd6be; background: #eef6ee; color: #3c6444; }
+.round-badge.round-inconclusive { border-color: #e2dcc6; background: #f8f5ea; color: #6f6640; }
+.round-chart-meta { color: #6d776e; font-size: 10px; line-height: 1.45; }
+.round-chart-hypothesis { color: #9aa39b; font-size: 10px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
 .creative-section { margin-top: 6px; }
 .creative-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 12px; }
@@ -448,6 +465,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .chart-plot { min-height: 180px; }
   .chart-plot > svg { min-height: 178px; }
   .chart-footnote { font-size: 8px; }
+  .round-charts { padding: 16px 14px 14px; }
+  .round-chart-grid { grid-template-columns: 1fr; gap: 12px; }
   .next-panel { min-height: 225px; padding: 18px; }
   .next-panel h2 { margin-top: 14px; font-size: 19px; }
   .next-panel > p { font-size: 11px; }

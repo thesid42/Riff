@@ -53,6 +53,17 @@ describe('creative composer API', () => {
   let app: FastifyInstance;
   let campaignId: string;
 
+  // Media jobs run detached from the POST, so settle them before asserting the outcome.
+  async function submitJob(id: string, path: 'images' | 'videos', payload: unknown) {
+    const response = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/${path}`, payload });
+    if (response.statusCode !== 200) return response;
+    await app.waitForCreativeIdle();
+    const jobId = response.json().job.id as string;
+    const settled = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` });
+    const job = (settled.json().jobs as CreativeImageJob[]).find((item) => item.id === jobId);
+    return { statusCode: response.statusCode, json: () => ({ job }) } as typeof response;
+  }
+
   async function createCampaign(): Promise<string> {
     const response = await app.inject({ method: 'POST', url: '/api/campaigns', payload: campaignInput });
     expect(response.statusCode).toBe(201);
@@ -123,7 +134,7 @@ describe('creative composer API', () => {
     expect(malformed.statusCode).toBe(400);
     expect(fixture.bfl.submit).not.toHaveBeenCalled();
 
-    const created = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    const created = await submitJob(id, 'images', imageRequest);
     expect(created.statusCode).toBe(200);
     const job = created.json().job as CreativeImageJob;
     expect(job).toMatchObject({ id: imageRequest.requestId, campaignId: id, status: 'ready', imageUrl: `/api/creative-assets/${imageRequest.requestId}`, providerTaskId: 'task-123' });
@@ -134,7 +145,7 @@ describe('creative composer API', () => {
     expect(fixture.bfl.submit).toHaveBeenCalledWith(imageRequest.imagePrompt, 1_024, 1_024, expect.any(AbortSignal));
     expect(fixture.bfl.poll).toHaveBeenCalledTimes(1);
 
-    const duplicate = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    const duplicate = await submitJob(id, 'images', imageRequest);
     expect(duplicate.statusCode).toBe(200);
     expect(duplicate.json().job).toEqual(job);
     const conflict = await app.inject({
@@ -158,13 +169,13 @@ describe('creative composer API', () => {
     app = createApp({ databasePath, assetDir, providers: fixture.providers });
     const id = await createCampaign();
 
-    const response = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    const response = await submitJob(id, 'images', imageRequest);
     expect(response.statusCode).toBe(200);
     expect(response.json().job).toMatchObject({ status: 'uncertain', providerTaskId: null });
     expect(JSON.stringify(response.json())).not.toContain('private provider secret');
     expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
 
-    const duplicate = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    const duplicate = await submitJob(id, 'images', imageRequest);
     expect(duplicate.json().job.status).toBe('uncertain');
     expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
     const otherKey = await app.inject({
@@ -179,9 +190,9 @@ describe('creative composer API', () => {
     const fixture = fakeProviders({ submit: async () => { throw new ProviderError('BFL request failed with HTTP 402.'); } });
     app = createApp({ databasePath, assetDir, providers: fixture.providers });
     const id = await createCampaign();
-    const result = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    const result = await submitJob(id, 'images', imageRequest);
     expect(result.json().job).toMatchObject({ status: 'failed', error: 'The image provider reported insufficient credits (HTTP 402). No automatic retry was made.' });
-    await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    await submitJob(id, 'images', imageRequest);
     expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
   });
 
@@ -248,7 +259,7 @@ describe('creative composer API', () => {
     expect(invalid.statusCode).toBe(400);
     expect(video.submit).not.toHaveBeenCalled();
 
-    const result = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/videos`, payload: request });
+    const result = await submitJob(id, 'videos', request);
     expect(result.statusCode).toBe(200);
     const job = result.json().job as CreativeImageJob;
     expect(job).toMatchObject({
@@ -263,7 +274,7 @@ describe('creative composer API', () => {
     expect(range.statusCode).toBe(206);
     expect(range.headers['content-range']).toBe(`bytes 4-7/${videoBytes.byteLength}`);
     expect(new Uint8Array(range.rawPayload)).toEqual(videoBytes.subarray(4, 8));
-    const duplicate = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/videos`, payload: request });
+    const duplicate = await submitJob(id, 'videos', request);
     expect(duplicate.json().job).toEqual(job);
     expect(video.submit).toHaveBeenCalledTimes(1);
   });

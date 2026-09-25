@@ -8,6 +8,14 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
-    proxy: { '/api': 'http://127.0.0.1:3001' },
+    proxy: {
+      '/api': {
+        target: 'http://127.0.0.1:3001',
+        // Media generation polls the provider server-side; keep the proxy open longer
+        // than the longest job timeout (300s video) so replies are never dropped in transit.
+        timeout: 330_000,
+        proxyTimeout: 330_000,
+      },
+    },
   },
 });
