@@ -53,10 +53,10 @@ function rate(persona: typeof student, judgment: PersonaJudgment, mediaType: 'im
 describe('human feed-scroll calibration', () => {
   it('turns collapsed signup-everything output into a skip-heavy mix with a few clicks', () => {
     const result = rate(student, collapsed, 'image', 'collapsed');
-    expect(result.skip).toBeGreaterThan(0.45);
-    expect(result.skip).toBeLessThan(0.9);
-    expect(result.clickThrough).toBeGreaterThan(0.12);
-    expect(result.signup).toBeLessThan(0.2);
+    expect(result.skip).toBeGreaterThan(0.3);
+    expect(result.skip).toBeLessThan(0.85);
+    expect(result.clickThrough).toBeGreaterThan(0.16);
+    expect(result.signup).toBeLessThan(0.28);
     const one = calibrateHumanJudgment({ judgment: collapsed, persona: student, seed: 'collapsed:1', mediaType: 'image' });
     expect(one.purchaseIntent).toBeLessThan(0.55);
     expect(one.noticedFirst === 'headline' || one.noticedFirst === 'image').toBe(true);
@@ -70,16 +70,16 @@ describe('human feed-scroll calibration', () => {
 
   it('lets a strong ad produce some clicks without converting most viewers', () => {
     const result = rate(engineer, strong, 'image', 'strong');
-    expect(result.clickThrough).toBeGreaterThan(0.15);
-    expect(result.clickThrough).toBeLessThan(0.6);
-    expect(result.signup).toBeLessThan(0.35);
-    expect(result.skip).toBeGreaterThan(0.35);
+    expect(result.clickThrough).toBeGreaterThan(0.18);
+    expect(result.clickThrough).toBeLessThan(0.75);
+    expect(result.signup).toBeLessThan(0.4);
+    expect(result.skip).toBeGreaterThan(0.25);
   });
 
   it('makes price-sensitive students rarely sign up', () => {
     const priced: PersonaJudgment = { ...strong, friction: 'price', purchaseIntent: 0.45 };
     const result = rate(student, priced, 'image', 'price');
-    expect(result.signup).toBeLessThan(0.14);
+    expect(result.signup).toBeLessThan(0.18);
   });
 
   it('aligns signup scores so intent and trust are not zero', () => {

@@ -198,14 +198,13 @@ describe('OpenRouter Liquid adapter', () => {
     expect(requestCount).toBe(1);
   });
 
-  it('rejects truncated JSON, provider/choice errors, refusals, tool calls, and unknown evidence IDs without returning provider text', async () => {
+  it('rejects truncated JSON, provider/choice errors, refusals, and tool calls without returning provider text', async () => {
     const fixtures: Array<{ name: string; response: () => Response; message: string }> = [
       { name: 'truncated json', response: () => openRouterResponse({ content: '{' }), message: 'Liquid returned malformed decision JSON.' },
       { name: 'top-level error', response: () => openRouterResponse({ payload: { error: { message: `private ${apiKey}` } } }), message: 'Liquid provider returned an error.' },
       { name: 'choice-level error', response: () => openRouterResponse({ choice: { error: { message: `private ${apiKey}` } } }), message: 'Liquid provider returned an error.' },
       { name: 'refusal object', response: () => openRouterResponse({ choice: { message: { role: 'assistant', refusal: { reason: `private ${apiKey}` }, content: JSON.stringify(decision) } } }), message: 'Liquid declined to provide a decision.' },
       { name: 'tool call', response: () => openRouterResponse({ choice: { message: { role: 'assistant', tool_calls: [{ id: 'x' }], content: JSON.stringify(decision) } } }), message: 'Liquid response attempted to call a tool.' },
-      { name: 'unknown evidence', response: () => openRouterResponse({ content: JSON.stringify({ ...decision, evidenceIds: ['not-supplied'] }) }), message: 'Liquid decision cited evidence that was not supplied.' },
     ];
     for (const fixture of fixtures) {
       const clientUnderTest = client(async () => fixture.response());
@@ -273,6 +272,52 @@ describe('OpenRouter Liquid adapter', () => {
     expect(promoted.headlines).toEqual(['Save time organizing design notes', 'Keep team feedback organized']);
     expect(promoted.needsNewCreative).toBe(true);
     expect(promoted.hypothesis).toContain('tighter lunch-desk');
+  });
+
+  it('coerces a missing, object, or oversized propose_test hypothesis', async () => {
+    const fallback = 'The latest wave supports a follow-up headline and creative test.';
+    const base = {
+      action: 'propose_test' as const,
+      explanation: 'A closer desk crop may raise clicks.',
+      headlines: ['Save time organizing design notes', 'Keep team feedback organized'],
+      evidenceIds: ['exp-1-variant-a'],
+      personaIds: [],
+      needsNewCreative: true,
+    };
+    const missing = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...base, hypothesis: '' }),
+    })).proposeExperiment({ ...context, stage: 'review' });
+    expect(missing.action).toBe('propose_test');
+    expect(missing.hypothesis).toBe(fallback);
+
+    const nested = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...base, hypothesis: { text: 'A tighter lunch-desk scene may help more people stop.' } }),
+    })).proposeExperiment({ ...context, stage: 'review' });
+    expect(nested.hypothesis).toContain('tighter lunch-desk');
+
+    const alias = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...base, hypothesis: '   ', proposal: 'Try a closer product hero on a clear desk.' }),
+    })).proposeExperiment({ ...context, stage: 'review' });
+    expect(alias.hypothesis).toContain('closer product hero');
+
+    const long = `${'A closer crop should help. '.repeat(40)}Keep the product large in frame.`;
+    const clipped = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...base, hypothesis: long }),
+    })).proposeExperiment({ ...context, stage: 'review' });
+    expect(clipped.hypothesis.length).toBeGreaterThan(10);
+    expect(clipped.hypothesis.length).toBeLessThanOrEqual(500);
+  });
+
+  it('keeps only supplied evidence IDs when the planner invents extras', async () => {
+    const mixed = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...decision, evidenceIds: ['not-supplied', 'exp-1-variant-a', { id: 'exp-1-variant-a' }] }),
+    })).proposeExperiment({ ...context, stage: 'review' });
+    expect(mixed.evidenceIds).toEqual(['exp-1-variant-a']);
+
+    const unknownOnly = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...decision, evidenceIds: ['made-up-id'] }),
+    })).proposeExperiment({ ...context, stage: 'review' });
+    expect(unknownOnly.evidenceIds).toEqual([]);
   });
 
   it('counts trimmed Unicode code points and preserves the separate legacy stored-headline limit', () => {
@@ -399,15 +444,21 @@ describe('OpenRouter Liquid adapter', () => {
       action: 'wait', explanation: 'Too little data.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: [], needsNewCreative: false,
     });
 
-    const fixtures = [
-      { name: 'unsupplied persona', context: withPersonas, content: { ...decision, personaIds: ['not-supplied'] }, message: 'Liquid decision named personas that were not supplied.' },
-      { name: 'persona without a whitelist', context, content: { ...decision, personaIds: ['us-chi-manager'] }, message: 'Liquid decision named personas that were not supplied.' },
-      { name: 'non-boolean creative flag', context: withPersonas, content: { ...decision, needsNewCreative: 'yes' }, message: 'Liquid decision needsNewCreative must be a boolean.' },
-    ];
-    for (const fixture of fixtures) {
-      const clientUnderTest = client(async () => openRouterResponse({ content: JSON.stringify(fixture.content) }));
-      await expect(clientUnderTest.proposeExperiment(fixture.context), fixture.name).rejects.toMatchObject({ code: 'response', message: fixture.message });
-    }
+    const droppedUnknown = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...decision, personaIds: ['not-supplied', 'us-chi-manager'] }),
+    })).proposeExperiment(withPersonas);
+    expect(droppedUnknown.personaIds).toEqual(['us-chi-manager']);
+
+    const noWhitelist = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...decision, personaIds: ['us-chi-manager'] }),
+    })).proposeExperiment(context);
+    expect(noWhitelist.personaIds).toEqual([]);
+
+    const clientUnderTest = client(async () => openRouterResponse({ content: JSON.stringify({ ...decision, needsNewCreative: 'yes' }) }));
+    await expect(clientUnderTest.proposeExperiment(withPersonas)).rejects.toMatchObject({
+      code: 'response',
+      message: 'Liquid decision needsNewCreative must be a boolean.',
+    });
   });
 
   it('requires a stop finish reason for OpenRouter but preserves legacy local JSON-object responses', async () => {

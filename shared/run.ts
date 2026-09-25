@@ -169,6 +169,19 @@ export interface WaveSnapshot {
   successClickRate: number;
   /** Effective auto-round cap for this campaign. 0 means no cap. */
   maxAutoRounds: number;
+  /** What the campaign agent is doing right now, or null when it is idle. */
+  loopActivity: LoopActivity | null;
+}
+
+export type LoopPhase = 'judging' | 'reviewing' | 'generating' | 'starting';
+
+export interface LoopActivity {
+  phase: LoopPhase;
+  title: string;
+  detail: string;
+  round: number;
+  /** The latest notable thing that happened in this loop, such as a new image or a failed generate. */
+  event: string | null;
 }
 
 export type LoopStopReason = 'threshold_met' | 'round_cap' | 'paused' | 'review_failed' | 'rules_failed' | 'creative_failed';
@@ -209,6 +222,7 @@ export function emptyWaveSnapshot(agentCount = DEFAULT_AGENT_COUNT, concurrency 
     loopActive: false,
     successClickRate: DEFAULT_SUCCESS_CLICK_RATE,
     maxAutoRounds: DEFAULT_MAX_AUTO_ROUNDS,
+    loopActivity: null,
   };
 }
 

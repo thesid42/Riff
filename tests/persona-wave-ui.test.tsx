@@ -178,6 +178,27 @@ describe('persona experiment setup', () => {
     expect(screen.getByText('Detailed results', { exact: true }).closest('details')?.open).toBe(false);
   });
 
+  it('shows a live activity card while the campaign agent is iterating', () => {
+    installApi();
+    render(<WaveHarness initialWave={fixtureWave({
+      runtime: 'running', loopContinuing: true, loopActive: true, experimentId: 'experiment-live',
+      maxAutoRounds: 0,
+      progress: { total: 16, pending: 6, running: 4, succeeded: 6, failed: 0 },
+      loopActivity: {
+        phase: 'judging', title: 'Judging this wave', detail: '6 of 16 personas finished · 4 live · 6 judged',
+        round: 2, event: 'Generated a new image from the last lesson.',
+      },
+    })} />);
+
+    const live = screen.getByLabelText('Campaign agent activity');
+    expect(live).toBeTruthy();
+    expect(live.textContent).toContain('Judging this wave');
+    expect(live.textContent).toContain('6 of 16 personas finished · 4 live · 6 judged');
+    expect(live.textContent).toContain('Round 2');
+    expect(live.textContent).toContain('Generated a new image from the last lesson.');
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeTruthy();
+  });
+
   it('edits the audience in one flat panel and resets it when the keyed campaign changes', async () => {
     installApi();
     const user = userEvent.setup();

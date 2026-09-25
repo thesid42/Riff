@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import {
   ArrowRight, BarChart3, BookOpen, Check, ChevronDown, CircleHelp, FlaskConical,
-  Leaf, LoaderCircle, Plus, Settings2, Sprout, X,
+  LayoutDashboard, Leaf, LoaderCircle, Plus, Settings2, Sprout, X,
 } from 'lucide-react';
 import type {
   Campaign, Experiment, IntegrationStatus, Lesson, MetricsSnapshot, Variant,
@@ -10,12 +10,13 @@ import type { RoundSummary, WaveSnapshot } from '../shared/run.js';
 import type { CreativeImageJob } from '../shared/creative.js';
 import { isStoredHeadlineSet, isValidHeadlineSet } from '../shared/headlines.js';
 import CreativeComposer from './CreativeComposer.js';
+import WorkspaceDashboard from './Dashboard.js';
 import PersonaWave from './PersonaWave.js';
 import SignupChart from './SignupChart.js';
 import ExperimentResults from './ExperimentResults.js';
 import './charts.css';
 
-type View = 'Campaign' | 'Experiments' | 'Lessons' | 'Connections';
+type View = 'Dashboard' | 'Campaign' | 'Experiments' | 'Lessons' | 'Connections';
 type Drawer = 'metrics' | 'setup' | null;
 
 interface CampaignDetails {
@@ -120,7 +121,7 @@ function displayTime(value: string | null | undefined): string | null {
 export default function App() {
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedId, setSelectedId] = useState('');
-  const [view, setView] = useState<View>('Campaign');
+  const [view, setView] = useState<View>('Dashboard');
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState('');
   const [listRetry, setListRetry] = useState(0);
@@ -304,6 +305,7 @@ export default function App() {
 
   const retryCampaign = () => setCampaignRetry((count) => count + 1);
   const navItems: Array<{ label: View; icon: typeof BarChart3 }> = [
+    { label: 'Dashboard', icon: LayoutDashboard },
     { label: 'Campaign', icon: BarChart3 },
     { label: 'Experiments', icon: FlaskConical },
     { label: 'Lessons', icon: BookOpen },
@@ -313,7 +315,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#campaign" onClick={(event) => { event.preventDefault(); setView('Campaign'); }} aria-label="Riff home">
+        <a className="brand" href="#dashboard" onClick={(event) => { event.preventDefault(); setView('Dashboard'); }} aria-label="Riff home">
           <span className="brand-mark"><Sprout size={20} strokeWidth={1.8} /></span>
           <span>Riff</span>
         </a>
@@ -336,7 +338,7 @@ export default function App() {
         {listError && <div className="alert alert-error" role="alert"><span>{listError}</span><button type="button" className="text-button" onClick={() => setListRetry((count) => count + 1)}>Retry</button></div>}
         {listLoading && campaigns.length === 0 && !listError ? <LoadingState label="Loading saved campaigns…" /> : (
           <>
-            <section className="campaign-heading" aria-label="Campaign controls">
+            {view !== 'Dashboard' && <section className="campaign-heading" aria-label="Campaign controls">
               <div className="campaign-heading-main">
                 <div className="eyebrow"><span className="eyebrow-line" /> CAMPAIGN WORKSPACE</div>
                 <div className="heading-row">
@@ -354,7 +356,7 @@ export default function App() {
                       ) : (
                       <h1>{listLoading || listError ? 'Campaign workspace' : 'Your next campaign starts here'}</h1>
                     )}
-                    {campaigns.length > 0 && <div className="campaign-meta"><span className="status-pill"><span className="status-dot" /> {details?.wave?.runtime === 'running' ? 'Draft · agent running' : details?.wave?.loopActive || details?.wave?.loopContinuing ? 'Draft · improving' : details?.wave?.runtime === 'paused' ? 'Draft · agent paused' : 'Draft'}</span><span>{activeCampaign?.product ?? 'Campaign brief'}</span></div>}
+                    {campaigns.length > 0 && <div className="campaign-meta"><span className={`status-pill ${details?.wave?.loopActivity || details?.wave?.runtime === 'running' || details?.wave?.loopContinuing ? 'wave-running' : ''}`}>{details?.wave?.loopActivity || details?.wave?.runtime === 'running' || details?.wave?.loopContinuing ? <LoaderCircle size={13} className="spin" /> : <span className="status-dot" />} {details?.wave?.loopActivity?.title ? `Draft · ${details.wave.loopActivity.title.toLowerCase()}` : details?.wave?.runtime === 'running' ? 'Draft · agent running' : details?.wave?.loopActive || details?.wave?.loopContinuing ? 'Draft · improving' : details?.wave?.runtime === 'paused' ? 'Draft · agent paused' : 'Draft'}</span><span>{activeCampaign?.product ?? 'Campaign brief'}</span></div>}
                   </div>
                   <div className="heading-actions">
                     {activeCampaign && <button type="button" className="button button-secondary" onClick={() => {
@@ -369,8 +371,23 @@ export default function App() {
                   ? `${activeCampaign.audience} · Sign-up goal · Saved ${displayTime(activeCampaign.createdAt) ?? 'as a draft'}`
                   : 'Shape a brief, save a draft, and keep every result grounded in real campaign data.'}</p>
               </div>
-            </section>
+            </section>}
 
+            {view === 'Dashboard' && (
+              <WorkspaceDashboard
+                campaigns={campaigns}
+                integrations={integrations}
+                listLoading={listLoading}
+                listError={listError}
+                onRetryList={() => setListRetry((count) => count + 1)}
+                onCreate={() => { setSaveError(''); setDialogOpen(true); }}
+                onOpenCampaign={(campaignId) => { setSelectedId(campaignId); setView('Campaign'); }}
+                onOpenExperiments={(campaignId) => { setSelectedId(campaignId); setView('Experiments'); }}
+                onOpenLessons={(campaignId) => { setSelectedId(campaignId); setView('Lessons'); }}
+                onOpenConnections={() => setView('Connections')}
+                onSetup={() => setDrawer('setup')}
+              />
+            )}
             {view === 'Campaign' && (
               <CampaignDashboard
                 campaign={activeCampaign}

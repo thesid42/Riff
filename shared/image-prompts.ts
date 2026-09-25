@@ -48,19 +48,48 @@ function physicalStaging(product: string): string {
   return 'Stage the complete intact product in a natural resting position with realistic connected parts and believable proportions.';
 }
 
-/** Append a saved experiment lesson so the next image or video can follow it. */
-export function applyLessonToImagePrompt(base: string, statement: string, maxLength = 4_000): string {
+const LESSON_MARKER = 'Keep the same premium product photography quality.';
+
+/** Turn a lesson into a short visual change, never a metrics dump or scene about the personas. */
+export function visualDirectionFromLesson(statement: string): string {
   const lesson = statement.trim().replace(/[\p{Cc}\uFFFD]/gu, ' ').replace(/\s+/g, ' ');
-  if (!lesson) return base.trim().slice(0, maxLength).trim();
-  const marker = 'Apply this experiment learning to the next image or video:';
-  if (base.includes(marker) && base.includes(lesson)) return base.trim().slice(0, maxLength).trim();
-  const note = `${marker} ${lesson}`;
+  if (!lesson) return '';
+  const changes: string[] = [];
+  if (/\b(wide|wide[- ]angle|too far|far away|small in (the )?frame|lost in (the )?frame)\b/i.test(lesson)) {
+    changes.push('Move in closer so the product fills more of the frame.');
+  }
+  if (/\b(close|tight|crop|hero)\b/i.test(lesson) && !changes.length) {
+    changes.push('Use a tighter hero framing with the product clearly dominant.');
+  }
+  if (/\b(clutter|busy background|crowded|too many objects)\b/i.test(lesson)) {
+    changes.push('Simplify the background and remove extra objects.');
+  }
+  if (/\b(dark|dim|low light|muddy)\b/i.test(lesson)) {
+    changes.push('Brighten with soft even light and clearer material highlights.');
+  }
+  if (/\b(desk|office|workplace|commute|kitchen|table)\b/i.test(lesson)) {
+    changes.push('Keep a simple everyday setting that still reads as a product photograph.');
+  }
+  if (/\b(hand|hold|carry|in use|lifestyle)\b/i.test(lesson)) {
+    changes.push('If a hand appears, keep it secondary and the product sharp and intact.');
+  }
+  const change = (changes.length ? [...new Set(changes)].slice(0, 2) : [
+    'Keep a closer, clearer product hero with open copy space.',
+  ]).join(' ');
+  return `${LESSON_MARKER} Do not add text, charts, people talking, UI, or captions. ${change}`;
+}
+
+/** Append a short visual change from the last experiment, without copying the lesson into the photo. */
+export function applyLessonToImagePrompt(base: string, statement: string, maxLength = 4_000): string {
+  const direction = visualDirectionFromLesson(statement);
+  if (!direction) return base.trim().slice(0, maxLength).trim();
+  if (base.includes(LESSON_MARKER)) return base.trim().slice(0, maxLength).trim();
   const prefix = base.trim();
-  const joined = prefix ? `${prefix} ${note}` : note;
+  const joined = prefix ? `${prefix} ${direction}` : direction;
   if (joined.length <= maxLength) return joined;
-  const room = maxLength - note.length - 1;
-  if (room < 40) return note.slice(0, maxLength).trim();
-  return `${prefix.slice(0, room).trim()} ${note}`.slice(0, maxLength).trim();
+  const room = maxLength - direction.length - 1;
+  if (room < 40) return direction.slice(0, maxLength).trim();
+  return `${prefix.slice(0, room).trim()} ${direction}`.slice(0, maxLength).trim();
 }
 
 function cleanContext(value: string, fallback: string, maxLength: number): string {

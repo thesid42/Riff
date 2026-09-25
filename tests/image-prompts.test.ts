@@ -53,13 +53,15 @@ describe('commercial product image prompts', () => {
     expect(suggestImagePrompt(campaign)).toBe(buildProductImagePrompt({ product: campaign.product, audience: campaign.audience }, 'hero'));
   });
 
-  it('appends an experiment lesson to the next image or video prompt once', () => {
+  it('appends a short visual change from the lesson without copying the metrics dump', () => {
     const base = 'Single steel lunch jar on a desk.';
-    const lesson = 'Desk workers skipped the wide product hero.';
+    const lesson = 'Desk workers skipped the wide product hero. 0/7 sign-ups, relevance was the main friction.';
     const first = applyLessonToImagePrompt(base, lesson);
     expect(first).toContain(base);
-    expect(first).toContain('Apply this experiment learning to the next image or video:');
-    expect(first).toContain(lesson);
+    expect(first).toContain('Keep the same premium product photography quality.');
+    expect(first).toContain('Move in closer so the product fills more of the frame.');
+    expect(first).not.toContain('0/7 sign-ups');
+    expect(first).not.toContain('Desk workers skipped');
     expect(applyLessonToImagePrompt(first, lesson)).toBe(first);
     expect(applyLessonToImagePrompt(base, '').length).toBeLessThanOrEqual(4_000);
   });

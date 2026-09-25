@@ -95,6 +95,41 @@
 .experiment-audience-summary svg { flex: 0 0 auto; color: #638267; }
 .experiment-start-guidance { margin: -5px 0 0; color: #765d3a; }
 
+.loop-live {
+  display: grid;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid #cfe0cc;
+  border-radius: 12px;
+  background: #f3f8f2;
+}
+.loop-live-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.loop-live-row > svg { flex: 0 0 auto; margin-top: 2px; color: #3f6d46; }
+.loop-live-row strong { display: block; color: #2f4a34; font: 700 14px/1.35 'Manrope', sans-serif; }
+.loop-live-row p { margin: 3px 0 0; color: #4d5f51; font-size: 13px; line-height: 1.45; }
+.loop-live-round {
+  margin-left: auto;
+  flex: 0 0 auto;
+  color: #46684b;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.loop-live-progress { margin: 0; }
+.loop-live-event {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #fff;
+  color: #3d5342;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .wave-setup-tabs {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

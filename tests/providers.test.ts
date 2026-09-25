@@ -185,13 +185,13 @@ describe('Liquid advisor', () => {
     expect(fixture.calls[0].init.redirect).toBe('error');
   });
 
-  it('rejects invented evidence IDs and invalid model output', async () => {
+  it('drops invented evidence IDs and still rejects malformed JSON', async () => {
     const fixture = captureFetch(() => responseJson({ choices: [{ message: { content: JSON.stringify({
       action: 'propose_test', explanation: 'A comparison can be run.', hypothesis: 'A clearer benefit improves signups.',
-      headlines: ['Start today', 'Try the product today'], evidenceIds: ['not-supplied'],
+      headlines: ['Start today', 'Try the product today'], evidenceIds: ['not-supplied', 'event-1'],
     }) } }] }));
     const client = new LiquidClient({ baseUrl: 'http://localhost:8080/v1', model: 'test-model' }, fixture.fetch);
-    await expect(client.proposeExperiment(context)).rejects.toMatchObject({ code: 'response', message: 'Liquid decision cited evidence that was not supplied.' });
+    await expect(client.proposeExperiment(context)).resolves.toMatchObject({ evidenceIds: ['event-1'] });
 
     const malformed = new LiquidClient({ baseUrl: 'http://localhost:8080/v1', model: 'test-model' }, async () => responseJson({ choices: [{ message: { content: '{' } }] }));
     await expect(malformed.proposeExperiment(context)).rejects.toMatchObject({ code: 'response', message: 'Liquid returned malformed decision JSON.' });

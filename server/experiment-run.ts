@@ -7,6 +7,8 @@ import {
   type AgentJob,
   type CreativeOutcome,
   type DecisionRecord,
+  type LoopActivity,
+  type LoopPhase,
   type LoopStatus,
   type LoopStopReason,
   type PersonaSegmentMetrics,
@@ -107,6 +109,8 @@ export class ExperimentRunService {
   private readonly pendingRounds = new Map<string, ReturnType<typeof setTimeout>>();
   /** Chained rounds between their timer and start(), including any wait on image generation. */
   private readonly preparing = new Map<string, { controller: AbortController; task: Promise<void> }>();
+  /** Live phase and the latest iteration event, so the UI can say what the agent is doing. */
+  private readonly loopActivities = new Map<string, LoopActivity>();
 
   constructor(private readonly options: ExperimentRunOptions) {}
 
@@ -131,6 +135,52 @@ export class ExperimentRunService {
       loopActive: this.options.database.isLoopActive(campaign.id),
       successClickRate: this.loopThreshold(campaign),
       maxAutoRounds: this.loopMaxRounds(campaign),
+      loopActivity: this.liveActivity(campaign, jobs),
+    };
+  }
+
+  private setLoopActivity(campaignId: string, next: { phase: LoopPhase; title: string; detail: string; round?: number; event?: string | null }): void {
+    const prior = this.loopActivities.get(campaignId);
+    this.loopActivities.set(campaignId, {
+      phase: next.phase,
+      title: next.title,
+      detail: next.detail,
+      round: next.round ?? prior?.round ?? (this.options.database.listExperiments(campaignId).length || 1),
+      event: next.event !== undefined ? next.event : prior?.event ?? null,
+    });
+  }
+
+  private liveActivity(campaign: Campaign, jobs: AgentJob[]): LoopActivity | null {
+    const stored = this.loopActivities.get(campaign.id);
+    const live = campaign.runtime === 'running' || this.pendingRounds.has(campaign.id) || this.preparing.has(campaign.id) || this.options.database.isLoopActive(campaign.id);
+    if (!live) return null;
+    const round = stored?.round || this.options.database.listExperiments(campaign.id).length || 1;
+    const event = stored?.event ?? this.creativeNotes.get(campaign.id) ?? null;
+    const progress = jobProgress(jobs);
+    if (this.preparing.has(campaign.id) || this.pendingRounds.has(campaign.id)) {
+      return stored ?? {
+        phase: this.preparing.has(campaign.id) ? 'generating' : 'starting',
+        title: this.preparing.has(campaign.id) ? 'Preparing the next round' : 'Starting the next round',
+        detail: 'The last wave finished. The next test is getting ready.',
+        round, event,
+      };
+    }
+    if (campaign.runtime === 'running') {
+      const done = progress.succeeded + progress.failed;
+      return {
+        phase: 'judging',
+        title: 'Judging this wave',
+        detail: progress.total
+          ? `${done} of ${progress.total} personas finished · ${progress.running} live · ${progress.succeeded} judged`
+          : 'Personas are lining up to inspect the ad.',
+        round, event,
+      };
+    }
+    return stored ?? {
+      phase: 'reviewing',
+      title: 'Writing the lesson',
+      detail: 'The wave finished. The agent is turning results into the next improvement.',
+      round, event,
     };
   }
 
@@ -297,6 +347,7 @@ export class ExperimentRunService {
     this.options.database.setLoopActive(campaign.id, true, new Date().toISOString());
     if (!round.chained) {
       this.creativeNotes.delete(campaign.id);
+      this.loopActivities.delete(campaign.id);
       this.cancelPreparing(campaign.id);
     }
     const hypothesis = round.hypothesis || (visualMode === 'distinct'
@@ -365,6 +416,13 @@ export class ExperimentRunService {
       finishedAt: null,
     })));
     this.options.database.setRuntime(campaign.id, 'running', input.agentCount, input.concurrency, now);
+    this.setLoopActivity(campaign.id, {
+      phase: 'judging',
+      title: 'Judging this wave',
+      detail: `${input.agentCount} personas are inspecting the ad.`,
+      round: this.options.database.listExperiments(campaign.id).length,
+      event: round.chained ? undefined : null,
+    });
     this.pump(campaign.id, input.concurrency);
     return this.snapshot(this.options.database.getCampaign(campaign.id)!);
   }
@@ -379,6 +437,7 @@ export class ExperimentRunService {
     this.cancelPreparing(campaign.id);
     // A manual pause ends the automatic loop; scheduleNextRound also re-checks runtime.
     this.options.database.setLoopActive(campaign.id, false, new Date().toISOString());
+    this.loopActivities.delete(campaign.id);
     this.loopStatuses.set(campaign.id, {
       reason: 'paused',
       round: this.options.database.listExperiments(campaign.id).length,
@@ -400,6 +459,11 @@ export class ExperimentRunService {
     if (!this.options.liquid || !this.options.analytics) throw new RunServiceError(503, 'provider_unavailable', 'Liquid and analytics must stay configured to resume.');
     this.options.database.setLoopActive(campaign.id, true, new Date().toISOString());
     this.loopStatuses.delete(campaign.id);
+    this.setLoopActivity(campaign.id, {
+      phase: 'judging',
+      title: 'Judging this wave',
+      detail: 'The campaign agent resumed. Personas are inspecting the ad again.',
+    });
     this.options.database.setRuntime(campaign.id, 'running', campaign.agentCount, campaign.concurrency, new Date().toISOString());
     this.pump(campaign.id, campaign.concurrency);
     return this.snapshot(this.options.database.getCampaign(campaign.id)!);
@@ -567,6 +631,11 @@ export class ExperimentRunService {
     this.options.database.setRuntime(campaignId, 'idle', campaign.agentCount, campaign.concurrency, now);
     if (succeeded === 0) return;
     this.reviewErrors.delete(campaignId);
+    this.setLoopActivity(campaignId, {
+      phase: 'reviewing',
+      title: 'Writing the lesson',
+      detail: 'The wave finished. Turning persona results into the next improvement.',
+    });
 
     // Step 5 feeding step 6: judge the round against the configured success threshold using the
     // same metrics the dashboard shows, and record which source decided it.
@@ -577,6 +646,7 @@ export class ExperimentRunService {
     const bestClickRate = bestVariantClickRate(measured);
     const stop = (reason: LoopStopReason, message: string) => {
       this.options.database.setLoopActive(campaignId, false, new Date().toISOString());
+      this.loopActivities.delete(campaignId);
       const creativeNote = this.creativeNotes.get(campaignId);
       this.loopStatuses.set(campaignId, {
         reason, round, maxRounds, message, bestClickRate, threshold, metricsSource: measured.source === 'none' ? 'none' : measured.source,
@@ -654,6 +724,12 @@ export class ExperimentRunService {
         status: 'active',
         createdAt: decision.createdAt,
       });
+      this.setLoopActivity(campaignId, {
+        phase: 'reviewing',
+        title: 'Lesson saved',
+        detail: 'The lesson is ready. Deciding whether to improve the next image or keep collecting.',
+        event: 'Saved a lesson from this wave.',
+      });
       if (thresholdMet) {
         stop('threshold_met', `A variant reached a ${((bestClickRate ?? 0) * 100).toFixed(1)}% click rate, meeting the ${(threshold * 100).toFixed(1)}% threshold, so the loop stopped.`);
         return;
@@ -675,6 +751,12 @@ export class ExperimentRunService {
         }
         const current = this.loopRounds.get(campaignId);
         this.loopStatuses.delete(campaignId);
+        this.setLoopActivity(campaignId, {
+          phase: 'starting',
+          title: 'Collecting more evidence',
+          detail: 'The last wave was too thin to plan from. Running another pass on the same test.',
+          event: 'Not enough signal yet. Collecting more evidence on the same test.',
+        });
         this.scheduleNextRound(campaignId, round, {
           kind: 'collect',
           decisionId: decision.id,
@@ -699,6 +781,16 @@ export class ExperimentRunService {
         return;
       }
       this.loopStatuses.delete(campaignId);
+      this.setLoopActivity(campaignId, {
+        phase: 'starting',
+        title: proposed.needsNewCreative ? 'Improving the next image' : 'Planning the next test',
+        detail: proposed.needsNewCreative
+          ? 'The next round will generate a new image from a short visual change, not the raw lesson text.'
+          : 'The next round will keep the current image and try new wording.',
+        event: proposed.needsNewCreative
+          ? 'Next: generate a new image from the lesson.'
+          : 'Next: keep the current image and test new headlines.',
+      });
       this.scheduleNextRound(campaignId, round, {
         kind: 'test',
         decisionId: decision.id,
@@ -722,6 +814,12 @@ export class ExperimentRunService {
       }
       const fallback = this.fallbackDecision(campaign, experiment, fallbackLessonStatement(campaign.headlines, segments, bestClickRate), evidence.map((item) => item.id));
       this.loopStatuses.delete(campaignId);
+      this.setLoopActivity(campaignId, {
+        phase: 'starting',
+        title: 'Continuing after a review issue',
+        detail: 'A fallback lesson was saved. The next round will still try a new image.',
+        event: `Review had a problem: ${message} Saved a fallback lesson and continuing.`,
+      });
       this.scheduleNextRound(campaignId, round, {
         kind: 'test',
         decisionId: fallback.id,
@@ -774,6 +872,7 @@ export class ExperimentRunService {
     const round = this.options.database.listExperiments(campaignId).length;
     if (atRoundCap(round, maxRounds)) {
       this.options.database.setLoopActive(campaignId, false, new Date().toISOString());
+      this.loopActivities.delete(campaignId);
       this.loopStatuses.set(campaignId, {
         reason: 'round_cap',
         round,
@@ -788,6 +887,7 @@ export class ExperimentRunService {
     const bestClickRate = bestVariantClickRate(measured);
     if (bestClickRate != null && bestClickRate >= threshold) {
       this.options.database.setLoopActive(campaignId, false, new Date().toISOString());
+      this.loopActivities.delete(campaignId);
       this.loopStatuses.set(campaignId, {
         reason: 'threshold_met',
         round: this.options.database.listExperiments(campaignId).length,
@@ -888,6 +988,7 @@ export class ExperimentRunService {
   private async runNextRound(campaignId: string, round: number, next: NextRound, signal: AbortSignal): Promise<void> {
     const campaign = this.options.database.getCampaign(campaignId);
     const failed = (reason: LoopStopReason, message: string) => {
+      this.loopActivities.delete(campaignId);
       this.loopStatuses.set(campaignId, {
         reason,
         round,
@@ -922,6 +1023,20 @@ export class ExperimentRunService {
         };
       }
       if (creative.note) this.creativeNotes.set(campaignId, creative.note);
+      if (creative.ok) {
+        const event = creative.outcome === 'new'
+          ? 'Generated a new image from the last lesson.'
+          : creative.outcome === 'reused'
+            ? (creative.note ?? 'Kept the previous image for this round.')
+            : 'This round is running on headline copy only.';
+        this.setLoopActivity(campaignId, {
+          phase: 'starting',
+          title: 'Starting the next wave',
+          detail: 'Personas will now inspect the latest headlines and visual.',
+          round: this.options.database.listExperiments(campaignId).length + 1,
+          event,
+        });
+      }
 
       const latest = this.options.database.getCampaign(campaignId);
       if (!latest || latest.runtime !== 'idle' || this.workers.has(campaignId)) return;
@@ -948,6 +1063,12 @@ export class ExperimentRunService {
     const media = hasMedia(current.media);
     const headlinesMatch = current.headlines.length === headlines.length && current.headlines.every((headline, index) => headline === headlines[index]);
     if (!needsNewCreative && (!media || headlinesMatch)) {
+      this.setLoopActivity(campaign.id, {
+        phase: 'starting',
+        title: 'Keeping the current image',
+        detail: 'This round is a wording-only test, so the previous visual stays.',
+        event: 'Kept the previous image. This round tests new headlines.',
+      });
       return media
         ? { ok: true, outcome: 'reused', media: current.media, visualMode: current.visualMode }
         : { ok: true, outcome: 'text-only', media: headlines.map(() => ({ imageUrl: null, videoUrl: null })), visualMode: 'text-only' };
@@ -967,6 +1088,12 @@ export class ExperimentRunService {
       };
     }
 
+    this.setLoopActivity(campaign.id, {
+      phase: 'generating',
+      title: 'Generating a new image',
+      detail: 'Applying a short visual change from the last lesson, keeping the same product photography quality.',
+      event: 'Starting a new image from the last lesson.',
+    });
     let jobId: string;
     try {
       const lesson = latestLessonStatement(this.options.database, campaign.id);

@@ -98,6 +98,10 @@ function jsonResponse(body: unknown, status = 200): Response {
   } as Response;
 }
 
+async function openCampaignPage(user: ReturnType<typeof userEvent.setup>) {
+  await user.click(await screen.findByRole('button', { name: 'Campaign', exact: true }));
+}
+
 async function fillCampaignForm(user: ReturnType<typeof userEvent.setup>) {
   await user.type(screen.getByRole('textbox', { name: /Campaign name/ }), 'Weekend refill');
   await user.type(screen.getByRole('textbox', { name: /Product/ }), 'Reusable bottle');
@@ -119,6 +123,7 @@ describe('Riff dashboard', () => {
     const { calls } = installApi({ campaigns: [first, second], runResponse: () => new Promise((resolve) => { finishRun = resolve; }) });
     const user = userEvent.setup();
     render(<App />);
+    await openCampaignPage(user);
     await screen.findByRole('button', { name: 'Generate 2 images' });
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
     await user.click(screen.getByRole('button', { name: 'Run until target' }));
@@ -135,14 +140,37 @@ describe('Riff dashboard', () => {
     const { calls } = installApi();
     render(<App />);
 
-    expect(await screen.findByRole('heading', { name: 'Start with a campaign brief.' })).toBeTruthy();
-    expect(screen.getByRole('region', { name: 'Campaign metrics' })).toBeTruthy();
-    expect(screen.getAllByText('—').length).toBeGreaterThan(0);
-    expect(screen.getByText('No wave results yet')).toBeTruthy();
-    expect(screen.getByText('No campaign content yet')).toBeTruthy();
+    expect(await screen.findByRole('heading', { name: 'Dashboard' })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Start with a campaign brief.' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Create campaign draft' })).toBeTruthy();
     await waitFor(() => expect(calls.some((call) => call.url === '/api/integrations')).toBe(true));
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
     expect(calls.map((call) => call.url).sort()).toEqual(['/api/campaigns', '/api/integrations']);
+  });
+
+  it('summarizes saved campaigns on the workspace dashboard', async () => {
+    const first = fixtureCampaign({ headlines: ['Carry lunch without the leak', 'A 400 ml jar for the desk'] });
+    const second = fixtureCampaign({ id: 'campaign-2', name: 'Desk leftovers', product: 'Lunch jar', audience: 'People at work' });
+    installApi({
+      campaigns: [first, second],
+      lessons: {
+        [first.id]: [{
+          id: 'lesson-desk', campaignId: first.id, statement: 'Closer crop helped more people stop.',
+          audience: first.audience, offer: 'Buy now', experimentId: 'exp-1', evidenceIds: ['SEG-01'],
+          status: 'active', createdAt,
+        }],
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: first.name })).toBeTruthy();
+    expect(screen.getByRole('heading', { name: second.name })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'Workspace metrics' })).toBeTruthy();
+    expect((await screen.findAllByText('Closer crop helped more people stop.')).length).toBeGreaterThan(0);
+    await user.click(within(screen.getByRole('heading', { name: first.name }).closest('article') as HTMLElement).getByRole('button', { name: 'Open campaign' }));
+    expect(await screen.findByRole('region', { name: 'Campaign metrics' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Generate 2 images' })).toBeTruthy();
   });
 
   it('saves a draft with integer cents and claim lines without starting generation', async () => {
@@ -154,7 +182,8 @@ describe('Riff dashboard', () => {
     await fillCampaignForm(user);
     await user.click(screen.getByRole('button', { name: 'Save draft' }));
 
-    await screen.findByRole('heading', { name: 'Your campaign draft is saved.' });
+    await screen.findByRole('heading', { name: 'Version performance' });
+    expect((screen.getByRole('combobox', { name: 'Choose campaign' }) as HTMLSelectElement).value).toBe('campaign-1');
     await waitFor(() => expect(calls.some((call) => call.method === 'POST')).toBe(true));
     const post = calls.find((call) => call.method === 'POST');
     expect(post).toMatchObject({
@@ -254,6 +283,7 @@ describe('Riff dashboard', () => {
     });
     const user = userEvent.setup();
     render(<App />);
+    await openCampaignPage(user);
 
     const versionsTitle = await screen.findByText('Versions', { exact: true });
     expect(versionsTitle.closest('details')?.open).toBe(false);
@@ -340,8 +370,9 @@ describe('Riff dashboard', () => {
     await waitFor(() => expect(calls.some((call) => call.method === 'POST' && call.url === `/api/campaigns/${campaign.id}/creative/images`)).toBe(true));
     const generate = calls.find((call) => call.method === 'POST' && call.url === `/api/campaigns/${campaign.id}/creative/images`);
     expect(generate?.body).toMatchObject({ headlines: campaign.headlines });
-    expect(String((generate?.body as { imagePrompt?: string })?.imagePrompt)).toContain(lesson.statement);
-    expect(((generate?.body as { variantPrompts?: string[] })?.variantPrompts ?? []).every((prompt) => prompt.includes(lesson.statement))).toBe(true);
+    expect(String((generate?.body as { imagePrompt?: string })?.imagePrompt)).toContain('Keep the same premium product photography quality.');
+    expect(String((generate?.body as { imagePrompt?: string })?.imagePrompt)).not.toContain(lesson.statement);
+    expect(((generate?.body as { variantPrompts?: string[] })?.variantPrompts ?? []).every((prompt) => prompt.includes('Keep the same premium product photography quality.'))).toBe(true);
     expect(await screen.findByRole('button', { name: /Generating from this learning|Generating next image/ })).toBeTruthy();
   });
 });

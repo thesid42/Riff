@@ -38,16 +38,16 @@ export function personaPriors(persona: PersonaTemplate): PersonaPriors {
   let priceSensitivity = 0.38;
   let skepticism = 0.4;
   let busyness = 0.36;
-  if (persona.work === 'student' || persona.work === 'early-career') priceSensitivity += 0.22;
-  if (persona.work === 'specialist') skepticism += 0.18;
-  if (persona.work === 'manager') busyness += 0.12;
+  if (persona.work === 'student' || persona.work === 'early-career') priceSensitivity += 0.16;
+  if (persona.work === 'specialist') skepticism += 0.12;
+  if (persona.work === 'manager') busyness += 0.08;
   if (persona.work === 'retired') {
-    skepticism += 0.08;
+    skepticism += 0.06;
     busyness -= 0.12;
   }
-  if (persona.ageBand === '18-24') priceSensitivity += 0.06;
-  if (persona.ageBand === '55+') skepticism += 0.08;
-  if (persona.device === 'phone') busyness += 0.16;
+  if (persona.ageBand === '18-24') priceSensitivity += 0.04;
+  if (persona.ageBand === '55+') skepticism += 0.06;
+  if (persona.device === 'phone') busyness += 0.1;
   if (persona.household === 'family') priceSensitivity += 0.06;
   return {
     priceSensitivity: clampUnit(priceSensitivity),
@@ -78,21 +78,21 @@ function repairScores(judgment: PersonaJudgment, seed: string) {
 }
 
 function decideAction(scores: ReturnType<typeof repairScores>, priors: PersonaPriors, friction: PersonaFriction, seed: string): PersonaAction {
-  let clickLogit = -1.65;
+  let clickLogit = -1.35;
   clickLogit += 1.55 * scores.attention;
-  clickLogit += 0.75 * scores.clarity;
-  clickLogit += 0.55 * scores.purchaseIntent;
-  clickLogit -= 0.75 * priors.busyness;
-  clickLogit -= 0.35 * priors.skepticism;
-  clickLogit += frictionPenalty(friction, { busy: -0.55, relevance: -0.7, price: -0.2, trust: -0.35, none: 0.2 });
+  clickLogit += 0.8 * scores.clarity;
+  clickLogit += 0.6 * scores.purchaseIntent;
+  clickLogit -= 0.55 * priors.busyness;
+  clickLogit -= 0.25 * priors.skepticism;
+  clickLogit += frictionPenalty(friction, { busy: -0.4, relevance: -0.5, price: -0.15, trust: -0.25, none: 0.28 });
   if (hash01(`${seed}:click`) >= sigmoid(clickLogit)) return 'skip';
 
-  let signupLogit = -1.7;
+  let signupLogit = -1.5;
   signupLogit += 1.55 * scores.purchaseIntent;
   signupLogit += 1.15 * scores.trust;
-  signupLogit -= 0.75 * priors.priceSensitivity;
-  signupLogit -= 0.4 * priors.skepticism;
-  signupLogit += frictionPenalty(friction, { price: -0.75, trust: -0.85, relevance: -0.45, busy: -0.2, none: 0.3 });
+  signupLogit -= 0.6 * priors.priceSensitivity;
+  signupLogit -= 0.3 * priors.skepticism;
+  signupLogit += frictionPenalty(friction, { price: -0.6, trust: -0.7, relevance: -0.35, busy: -0.15, none: 0.32 });
   return hash01(`${seed}:signup`) < sigmoid(signupLogit) ? 'signup' : 'click';
 }
 

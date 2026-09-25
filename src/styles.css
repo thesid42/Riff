@@ -35,7 +35,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .brand strong { font-weight: 500; }
 .brand-mark { width: 33px; height: 33px; display: grid; place-items: center; border-radius: 10px; color: var(--sage); background: #edf3eb; }
 .primary-nav { align-self: stretch; display: flex; align-items: stretch; gap: 5px; min-width: 0; }
-.nav-item { position: relative; padding: 0 15px; display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; color: #5f6b61; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: color .16s ease, background .16s ease; }
+.nav-item { position: relative; padding: 0 12px; display: inline-flex; align-items: center; gap: 8px; border: 0; background: transparent; color: #5f6b61; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: color .16s ease, background .16s ease; }
 .nav-item:hover { color: var(--ink); background: #f7f9f6; }
 .nav-item.is-active { color: var(--sage-dark); }
 .nav-item.is-active::after { content: ''; height: 3px; position: absolute; bottom: -1px; left: 14px; right: 14px; border-radius: 3px 3px 0 0; background: #658d69; }

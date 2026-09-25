@@ -116,8 +116,12 @@ export default function PersonaWave({
   const waveHasResults = Boolean(wave && (wave.experimentId || wave.progress.total > 0));
   const scopedDecision = wave?.latestDecision && wave.experimentId &&
     wave.latestDecision.experimentId === wave.experimentId ? wave.latestDecision : null;
-  const statusLabel = runtime === 'running' ? 'Wave running' : runtime === 'paused' ? 'Wave paused' :
-    waveHasResults ? 'Latest wave saved' : 'Ready to run';
+  const live = Boolean(wave?.loopActivity || (wave?.loopContinuing && !wave?.loopStatus) || runtime === 'running');
+  const statusLabel = live
+    ? (wave?.loopActivity?.title ?? (runtime === 'running' ? 'Judging this wave' : 'Improving campaign'))
+    : runtime === 'paused' || wave?.loopStatus?.reason === 'paused' ? 'Wave paused'
+      : wave?.loopStatus?.reason === 'threshold_met' ? 'Target reached'
+        : waveHasResults ? 'Latest wave saved' : 'Ready to run';
 
   useEffect(() => {
     if (wave?.agentCount) setAgentCount(wave.agentCount);
@@ -236,8 +240,8 @@ export default function PersonaWave({
           <h2 id="wave-title">Experiment setup</h2>
           <p>Choose an audience and simulate how people respond to your ad.</p>
         </div>
-        <span className={`status-pill ${runtime === 'running' ? 'wave-running' : ''}`}>
-          <span className="status-dot" /> {statusLabel}
+        <span className={`status-pill ${live ? 'wave-running' : ''}`}>
+          {live ? <LoaderCircle size={13} className="spin" /> : <span className="status-dot" />} {statusLabel}
         </span>
       </div>
 
@@ -411,12 +415,29 @@ export default function PersonaWave({
           ? `Shorten headlines to ${HEADLINE_MAX_LENGTH} characters or fewer in Campaign before starting.`
           : `Add 2–3 unique headlines of up to ${HEADLINE_MAX_LENGTH} characters in Campaign before starting.`}</p>}
       </div>
-      {wave?.loopContinuing && !wave.loopStatus && (
-        <p className="loop-status" role="status">
-          {wave.loopActive
-            ? 'Campaign agent is running. It will keep testing and improving until the click-rate target is met.'
-            : 'Review finished. The automatic loop is preparing the next round.'}
-        </p>
+      {wave?.loopActivity && (
+        <section className="loop-live" aria-live="polite" aria-label="Campaign agent activity">
+          <div className="loop-live-row">
+            <LoaderCircle size={18} className="spin" />
+            <div>
+              <strong>{wave.loopActivity.title}</strong>
+              <p>{wave.loopActivity.detail}</p>
+            </div>
+            <span className="loop-live-round">Round {wave.loopActivity.round}{wave.maxAutoRounds > 0 ? ` of ${wave.maxAutoRounds}` : ''}</span>
+          </div>
+          {runtime === 'running' && total > 0 && (
+            <div className="wave-progress loop-live-progress" role="status">
+              <div className="progress-track" role="progressbar" aria-label="Current wave progress" aria-valuemin={0} aria-valuemax={total} aria-valuenow={Math.min(total, completed)}>
+                <span style={{ width: `${Math.min(100, (completed / total) * 100)}%` }} />
+              </div>
+              <small>{completed} of {total} personas · {progress?.succeeded ?? 0} judged · {progress?.failed ?? 0} failed</small>
+            </div>
+          )}
+          {wave.loopActivity.event && <p className="loop-live-event">{wave.loopActivity.event}</p>}
+        </section>
+      )}
+      {wave?.loopContinuing && !wave.loopStatus && !wave.loopActivity && (
+        <p className="loop-status" role="status">The campaign agent is running. It will keep testing and improving until the click-rate target is met.</p>
       )}
       {wave?.loopStatus && (
         <p className={`loop-status loop-${wave.loopStatus.reason}`} role="status">

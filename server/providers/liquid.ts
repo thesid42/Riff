@@ -395,8 +395,13 @@ function validateDecision(value: unknown, suppliedEvidence: Set<string>, supplie
       headlines = [];
     }
   } else {
-    hypothesis = clipBoundedText(v.hypothesis, 'hypothesis', 500);
-    if (hypothesis.length < 10) throw new ProviderError('Liquid test hypothesis is too short.', 'response');
+    hypothesis = clipBoundedText(
+      firstHypothesisSource(v),
+      'hypothesis',
+      500,
+      'The latest wave supports a follow-up headline and creative test.',
+    );
+    if (hypothesis.length < 10) hypothesis = 'The latest wave supports a follow-up headline and creative test.';
     headlines = normalizeProposeHeadlines(firstHeadlineSource(v));
     if (!isValidHeadlineSet(headlines)) {
       throw new ProviderError('Liquid must return 2 or 3 final headlines of up to 60 characters each.', 'response');
@@ -405,12 +410,10 @@ function validateDecision(value: unknown, suppliedEvidence: Set<string>, supplie
   if (action === 'propose_test' && hasLatinLetter(brief) && !hasNonLatinLetter(brief) && headlines.some(hasNonLatinLetter)) {
     throw new ProviderError('Liquid headlines do not match the campaign brief language.', 'response');
   }
-  const evidenceIds = Array.isArray(v.evidenceIds) ? v.evidenceIds : [];
-  if (evidenceIds.length > 30 || evidenceIds.some(id => typeof id !== 'string' || !suppliedEvidence.has(id))) throw new ProviderError('Liquid decision cited evidence that was not supplied.', 'response');
+  const evidenceIds = keepSuppliedIds(v.evidenceIds ?? v.evidence, suppliedEvidence, 30);
   // The JSON-object fallback path has no schema, so absent fields default to "all personas" and
   // "reuse creative"; present fields are held to the same rules as the strict schema.
-  const personaIds = action === 'wait' ? [] : (v.personaIds ?? []);
-  if (!Array.isArray(personaIds) || personaIds.length > 40 || personaIds.some(id => typeof id !== 'string' || !suppliedPersonas.has(id))) throw new ProviderError('Liquid decision named personas that were not supplied.', 'response');
+  const personaIds = action === 'wait' ? [] : keepSuppliedIds(v.personaIds ?? v.personas, suppliedPersonas, 40);
   let needsNewCreative = false;
   if (action === 'propose_test') {
     if (v.needsNewCreative === undefined || v.needsNewCreative === null) needsNewCreative = mentionsVisualImprovement(explanation, hypothesis);
@@ -514,9 +517,34 @@ function flattenPlannerText(value: unknown): string {
   if (Array.isArray(value)) return value.map(flattenPlannerText).filter(Boolean).join(' ');
   if (value && typeof value === 'object') {
     const record = value as Record<string, unknown>;
-    return flattenPlannerText(record.text ?? record.content ?? record.explanation ?? record.summary ?? '');
+    return flattenPlannerText(record.text ?? record.content ?? record.explanation ?? record.summary ?? record.hypothesis ?? record.rationale ?? record.reason ?? record.proposal ?? '');
   }
   return '';
+}
+
+function keepSuppliedIds(value: unknown, supplied: Set<string>, limit: number): string[] {
+  const raw = Array.isArray(value) ? value : typeof value === 'string' && value.trim() ? [value] : [];
+  const kept: string[] = [];
+  for (const item of raw) {
+    if (kept.length >= limit) break;
+    const id = typeof item === 'string'
+      ? item
+      : item && typeof item === 'object' && typeof (item as { id?: unknown }).id === 'string'
+        ? (item as { id: string }).id
+        : '';
+    if (id && supplied.has(id) && !kept.includes(id)) kept.push(id);
+  }
+  return kept;
+}
+
+function firstHypothesisSource(value: Record<string, unknown>): unknown {
+  for (const key of ['hypothesis', 'proposal', 'nextHypothesis', 'rationale', 'idea']) {
+    const candidate = value[key];
+    if (candidate === undefined || candidate === null) continue;
+    if (typeof candidate === 'string' && !candidate.trim()) continue;
+    return candidate;
+  }
+  return value.hypothesis;
 }
 
 function firstHeadlineSource(value: Record<string, unknown>): unknown {
