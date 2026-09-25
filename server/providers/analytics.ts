@@ -20,11 +20,13 @@ export type AnalyticsQuery = { campaignId: string; experimentId: string; start: 
 export type AnalyticsMetricRow = {
   variantId: string; impressions: number; uniqueVisitors: number; clicks: number; signups: number; spendCents: number;
 };
+/** One time bucket of cumulative sign-ups for a variant, used for the per-round chart. */
+export type AnalyticsSeriesRow = { timestamp: string; variantId: string; signups: number };
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const IDENT = /^[a-z][a-z0-9_]{0,62}$/;
 const ISO_UTC = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/;
 
-export interface AnalyticsClient { readonly provider: 'rawtree' | 'tinybird'; ingest(events: AnalyticsEvent[], signal?: AbortSignal): Promise<number>; query(input: AnalyticsQuery, signal?: AbortSignal): Promise<AnalyticsMetricRow[]>; }
+export interface AnalyticsClient { readonly provider: 'rawtree' | 'tinybird'; ingest(events: AnalyticsEvent[], signal?: AbortSignal): Promise<number>; query(input: AnalyticsQuery, signal?: AbortSignal): Promise<AnalyticsMetricRow[]>; querySeries(input: AnalyticsQuery, signal?: AbortSignal): Promise<AnalyticsSeriesRow[]>; }
 
 export function validateEvents(events: AnalyticsEvent[]): AnalyticsEvent[] {
   if (!Array.isArray(events) || events.length < 1 || events.length > 500) throw new ProviderError('Event batch must contain 1 to 500 events.', 'configuration');
@@ -77,6 +79,7 @@ abstract class BaseAnalytics implements AnalyticsClient {
   protected constructor(protected fetchImpl: FetchLike) {}
   abstract ingest(events: AnalyticsEvent[], signal?: AbortSignal): Promise<number>;
   abstract query(input: AnalyticsQuery, signal?: AbortSignal): Promise<AnalyticsMetricRow[]>;
+  abstract querySeries(input: AnalyticsQuery, signal?: AbortSignal): Promise<AnalyticsSeriesRow[]>;
   protected async request<T>(url: URL, init: RequestInit, consume: (response: Response, signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> {
     const timeout = timeoutSignal(15_000, signal);
     try {
@@ -113,12 +116,27 @@ export class RawtreeClient extends BaseAnalytics {
   }
   async query(input: AnalyticsQuery, signal?: AbortSignal): Promise<AnalyticsMetricRow[]> {
     const q = validateQuery(input);
-    const sql = `WITH deduplicated AS (SELECT event_id, argMax(variant_id, timestamp) AS variant_id, argMax(visitor_id, timestamp) AS visitor_id, argMax(event_type, timestamp) AS event_type, argMax(cost_cents, timestamp) AS cost_cents FROM ${this.config.table} WHERE campaign_id = '${q.campaignId}' AND experiment_id = '${q.experimentId}' AND timestamp >= '${q.start}' AND timestamp < '${q.end}' GROUP BY event_id) SELECT variant_id, countIf(event_type = 'impression') AS impressions, uniqExactIf(visitor_id, event_type = 'impression') AS unique_visitors, countIf(event_type = 'click') AS clicks, countIf(event_type = 'signup') AS signups, sum(cost_cents) AS spend_cents FROM deduplicated GROUP BY variant_id`;
+    // Rawtree infers columns as ClickHouse `Dynamic` from ingested JSON, and aggregate functions
+    // reject that type, so every column is cast before use.
+    const sql = `WITH deduplicated AS (SELECT event_id, argMax(toString(variant_id), toString(timestamp)) AS variant_id, argMax(toString(visitor_id), toString(timestamp)) AS visitor_id, argMax(toString(event_type), toString(timestamp)) AS event_type, argMax(toUInt32OrZero(toString(cost_cents)), toString(timestamp)) AS cost_cents FROM ${this.config.table} WHERE toString(campaign_id) = '${q.campaignId}' AND toString(experiment_id) = '${q.experimentId}' AND parseDateTimeBestEffort(toString(timestamp)) >= parseDateTimeBestEffort('${q.start}') AND parseDateTimeBestEffort(toString(timestamp)) < parseDateTimeBestEffort('${q.end}') GROUP BY event_id) SELECT variant_id, countIf(event_type = 'impression') AS impressions, uniqExactIf(visitor_id, event_type = 'impression') AS unique_visitors, countIf(event_type = 'click') AS clicks, countIf(event_type = 'signup') AS signups, sum(cost_cents) AS spend_cents FROM deduplicated GROUP BY variant_id`;
     const url = new URL('/v1/query', this.base);
     return this.request(url, { method: 'POST', headers: { authorization: `Bearer ${this.apiKey}`, 'x-rawtree-database': this.config.database, 'content-type': 'application/json' }, body: JSON.stringify({ sql }) }, async (response, signal) => {
       const result = object(await readJson(response, 256_000, signal));
       if (!Array.isArray(result.data) || result.data.length > 500) throw new ProviderError('Rawtree returned invalid metrics.', 'response');
       return result.data.map(parseMetric);
+    }, signal);
+  }
+
+  async querySeries(input: AnalyticsQuery, signal?: AbortSignal): Promise<AnalyticsSeriesRow[]> {
+    const q = validateQuery(input);
+    // Same event-level dedup as query(), then bucket by minute and accumulate sign-ups per
+    // variant so the chart shows a rising line rather than per-bucket counts.
+    const sql = `WITH deduplicated AS (SELECT event_id, argMax(toString(variant_id), toString(timestamp)) AS variant_id, argMax(toString(event_type), toString(timestamp)) AS event_type, max(toString(timestamp)) AS event_time FROM ${this.config.table} WHERE toString(campaign_id) = '${q.campaignId}' AND toString(experiment_id) = '${q.experimentId}' AND parseDateTimeBestEffort(toString(timestamp)) >= parseDateTimeBestEffort('${q.start}') AND parseDateTimeBestEffort(toString(timestamp)) < parseDateTimeBestEffort('${q.end}') GROUP BY event_id), buckets AS (SELECT variant_id, toStartOfMinute(parseDateTimeBestEffort(event_time)) AS bucket, countIf(event_type = 'signup') AS signups FROM deduplicated GROUP BY variant_id, bucket) SELECT variant_id, formatDateTime(bucket, '%Y-%m-%dT%H:%i:%S.000Z') AS timestamp, toUInt32(sum(signups) OVER (PARTITION BY variant_id ORDER BY bucket ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) AS signups FROM buckets ORDER BY variant_id, bucket`;
+    const url = new URL('/v1/query', this.base);
+    return this.request(url, { method: 'POST', headers: { authorization: `Bearer ${this.apiKey}`, 'x-rawtree-database': this.config.database, 'content-type': 'application/json' }, body: JSON.stringify({ sql }) }, async (response, signal) => {
+      const result = object(await readJson(response, 256_000, signal));
+      if (!Array.isArray(result.data) || result.data.length > 5_000) throw new ProviderError('Rawtree returned invalid series.', 'response');
+      return result.data.map(parseSeries);
     }, signal);
   }
 }
@@ -158,10 +176,28 @@ export class TinybirdClient extends BaseAnalytics {
       return result.data.map(parseMetric);
     }, signal);
   }
+
+  // Tinybird metrics come from a named pipe; there is no configured series pipe, so callers
+  // fall back to locally derived series rather than querying a pipe that may not exist.
+  async querySeries(): Promise<AnalyticsSeriesRow[]> {
+    return [];
+  }
 }
 
 function boundedToken(value: string, name: string): string {
   return boundedText(value, name, 4_096);
+}
+
+function parseSeries(value: unknown): AnalyticsSeriesRow {
+  const row = object(value, 'Analytics series row was invalid.');
+  const variantId = row.variant_id ?? row.variantId;
+  if (typeof variantId !== 'string' || !UUID.test(variantId)) throw new ProviderError('Analytics returned invalid variant ID.', 'response');
+  const timestamp = row.timestamp;
+  if (typeof timestamp !== 'string' || !ISO_UTC.test(timestamp)) throw new ProviderError('Analytics returned an invalid series timestamp.', 'response');
+  const raw = row.signups;
+  const signups = typeof raw === 'string' ? Number(raw) : raw;
+  if (typeof signups !== 'number' || !Number.isSafeInteger(signups) || signups < 0) throw new ProviderError('Analytics returned invalid series values.', 'response');
+  return { variantId, timestamp, signups };
 }
 
 function parseMetric(value: unknown): AnalyticsMetricRow {

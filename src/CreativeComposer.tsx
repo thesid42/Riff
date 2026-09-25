@@ -277,6 +277,12 @@ function sameDraft(job: CreativeImageJob, headlines: string[], variantPrompts: s
 
 function variantLabel(index: number): string { return String.fromCharCode(65 + index); }
 
+// Slightly above the server-side job timeouts (120s image / 300s video) so the
+// server reports its own outcome before the client gives up waiting.
+const IMAGE_DEADLINE_MS = 130_000;
+const VIDEO_DEADLINE_MS = 310_000;
+
+
 export default function CreativeComposer({ campaign, initialHeadlines, selectedCreativeJobId, onHeadlinesChange, onUseForExperiment }: {
   campaign: Campaign;
   initialHeadlines?: string[];
@@ -292,6 +298,8 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
   const versionsDisclosureRef = useRef<HTMLDetailsElement | null>(null);
   const planControllers = useRef(new Map<string, AbortController>());
   const previousOverlong = useRef({ campaignId: campaign.id, value: false });
+  const generationControllers = useRef(new Map<string, AbortController>());
+  const refreshControllers = useRef(new Map<string, AbortController>());
   const seedHeadlines = initialHeadlines !== undefined ? initialHeadlines : isStoredHeadlineSet(campaign.headlines) ? campaign.headlines : [];
   const seedState = seedHeadlines.length || initialHeadlines !== undefined ? { ...EMPTY_STATE, headlines: seedHeadlines, variantPrompts: defaultVariantPrompts(campaign, EMPTY_STATE.mediaType, seedHeadlines.length), headlinesTouched: initialHeadlines !== undefined || isStoredHeadlineSet(campaign.headlines) } : EMPTY_STATE;
   const state = campaignStates[campaign.id] ?? seedState;
@@ -444,9 +452,12 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
   async function refreshJobs() {
     const campaignId = campaign.id;
     const controller = new AbortController();
+    // Supersede any in-flight reload so overlapping clicks cannot apply out of order.
+    refreshControllers.current.get(campaignId)?.abort();
+    refreshControllers.current.set(campaignId, controller);
     updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'loading', loadError: '' }));
     try {
-    const result = await getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities>; headlines?: string[] }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal);
+      const result = await getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities>; headlines?: string[] }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal);
       if (typeof result?.imagePromptSuggestion !== 'string' || !Array.isArray(result.jobs)) throw new Error('Creative settings could not be read.');
       const jobs = result.jobs.filter((job) => isCreativeJob(job, campaignId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       updateCampaign(campaignId, (current) => {
@@ -455,7 +466,10 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
         return { ...current, loadStatus: 'ready', loadError: '', imagePromptSuggestion: result.imagePromptSuggestion, imagePrompt: current.promptEdited ? current.imagePrompt : result.imagePromptSuggestion, jobs, featuredJobId: current.featuredJobId ?? (current.generationLoading ? null : initialFeaturedJobId(jobs)), headlines: restored, variantPrompts: nextPrompts, capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true } };
       });
     } catch (error) {
+      if (controller.signal.aborted) return;
       updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'error', loadError: error instanceof Error ? error.message : 'Creative drafts could not be loaded.' }));
+    } finally {
+      if (refreshControllers.current.get(campaignId) === controller) refreshControllers.current.delete(campaignId);
     }
   }
 
@@ -479,21 +493,39 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
     }
     const requestId = createOrReuseRequestId(campaignId, requestFingerprint);
     updateCampaign(campaignId, (current) => ({ ...current, generationLoading: true, generationError: '', featuredJobId: null }));
+    const deadlineMs = mediaType === 'video' ? VIDEO_DEADLINE_MS : IMAGE_DEADLINE_MS;
+    const controller = new AbortController();
+    generationControllers.current.get(campaignId)?.abort();
+    generationControllers.current.set(campaignId, controller);
+    const timeout = AbortSignal.timeout(deadlineMs);
+    const combined = AbortSignal.any([controller.signal, timeout]);
+    const mergeJob = (job: CreativeImageJob, done: boolean) => {
+      updateCampaign(campaignId, (current) => ({
+        ...current,
+        generationLoading: !done,
+        generationError: done ? job.error ?? '' : current.generationError,
+        featuredJobId: job.id,
+        jobs: [job, ...current.jobs.filter((existing) => existing.id !== job.id)].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+      }));
+    };
     try {
       const path = mediaType === 'video' ? 'videos' : 'images';
       const body = mediaType === 'video' ? { requestId, headlines, imagePrompt, variantPrompts, videoOptions: state.videoOptions } : { requestId, headlines, imagePrompt, variantPrompts };
-      const result = await postJson<{ job: CreativeImageJob }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative/${path}`, body);
+      const result = await postJson<{ job: CreativeImageJob }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative/${path}`, body, combined);
       if (!isCreativeJob(result?.job, campaignId)) throw new Error('The creative request returned an invalid job. Refresh saved drafts before trying again.');
-      updateCampaign(campaignId, (current) => ({
-        ...current,
-        generationLoading: false,
-        generationError: result.job.error ?? '',
-        featuredJobId: result.job.id,
-        jobs: [result.job, ...current.jobs.filter((job) => job.id !== result.job.id)].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-      }));
+
+      // The submit returns as soon as the job is reserved; the polling effect above follows any
+      // job that is still active, so the spinner clears here and progress shows per version.
+      mergeJob(result.job, true);
       if (jobIsReady(result.job)) clearStoredRequest(campaignId, requestFingerprint, requestId);
     } catch (error) {
-      updateCampaign(campaignId, (current) => ({ ...current, generationLoading: false, generationError: error instanceof Error ? error.message : 'The creative request did not return a result. Reuse the same request to check its status.' }));
+      const message = combined.aborted && timeout.aborted
+        ? 'Generation is taking longer than expected. Reload saved jobs to check whether it finished.'
+        : error instanceof Error ? error.message : 'The creative request did not return a result. Reuse the same request to check its status.';
+      if (controller.signal.aborted && !timeout.aborted) return;
+      updateCampaign(campaignId, (current) => ({ ...current, generationLoading: false, generationError: message }));
+    } finally {
+      if (generationControllers.current.get(campaignId) === controller) generationControllers.current.delete(campaignId);
     }
   }
 
@@ -707,7 +739,7 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
             : 'Suggest headlines with Liquid or enter 2–3 manually.'}</p>}
           {headlinesValid && !validVariantPrompts(promptsForState, state.headlines.length) && <p className="composer-guidance">One or more directions need attention. Open Versions to fix them before generating.</p>}
           {headlinesValid && !promptValid && <p className="composer-guidance">The saved campaign visual context is missing. Reload creative settings before generating.</p>}
-          {headlinesValid && <p className="composer-guidance">Review each headline before generation. Persona experiments judge the copy only, not the pixels or video.</p>}
+          {headlinesValid && <p className="composer-guidance">Review each headline before generation. When a ready creative is selected, persona experiments inspect the image or video together with the copy.</p>}
         </div>
 
         <aside className="composer-side-note">

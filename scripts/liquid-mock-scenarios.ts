@@ -69,6 +69,8 @@ export const OFFLINE_FIXTURE_DECISIONS: ExperimentDecision[] = [
     hypothesis: 'A concrete capacity headline may invite more first-time visitors to join the waitlist.',
     headlines: ['A 750 ml bottle for every day', 'Take 750 ml along for the day'],
     evidenceIds: ['SYN-BRIEF-01', 'SYN-CLAIMS-01'],
+    personaIds: [],
+    needsNewCreative: false,
   },
   {
     action: 'wait',
@@ -76,6 +78,8 @@ export const OFFLINE_FIXTURE_DECISIONS: ExperimentDecision[] = [
     hypothesis: '',
     headlines: [],
     evidenceIds: ['SYN-LOW-A-01', 'SYN-LOW-B-01', 'SYN-MINIMUM-01'],
+    personaIds: [],
+    needsNewCreative: false,
   },
   {
     action: 'propose_test',
@@ -83,5 +87,7 @@ export const OFFLINE_FIXTURE_DECISIONS: ExperimentDecision[] = [
     hypothesis: 'For first-time visitors, compare two claim-safe headlines while keeping the offer and audience constant.',
     headlines: ['A steel bottle made for repeat use', 'A 750 ml bottle for every day'],
     evidenceIds: ['SYN-SHIFT-01', 'SYN-RETURNING-01'],
+    personaIds: [],
+    needsNewCreative: false,
   },
 ];

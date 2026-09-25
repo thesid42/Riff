@@ -1,4 +1,4 @@
-import type { PersonaJudgment } from '../../shared/run.js';
+import type { NoticedFirst, PersonaAction, PersonaFriction, PersonaJudgment } from '../../shared/run.js';
 import { clampRange, clampUnit } from '../../shared/run.js';
 import { HEADLINE_MAX_LENGTH, isValidHeadlineSet } from '../../shared/headlines.js';
 import { ProviderError, boundedText, cancelBody, object, readJson, rejectRedirect, safeBaseUrl, timeoutSignal, type FetchLike } from './common.js';
@@ -7,6 +7,8 @@ export interface ExperimentContext {
   brief: string;
   evidence: Array<{ id: string; summary: string }>;
   lessons: Array<{ id: string; statement: string }>;
+  /** Personas the next round may target. personaIds in the decision must come from this list. */
+  personas?: Array<{ id: string; label: string }>;
   stage?: 'initial' | 'review' | 'retest';
 }
 export interface ExperimentDecision {
@@ -15,6 +17,10 @@ export interface ExperimentDecision {
   hypothesis: string;
   headlines: string[];
   evidenceIds: string[];
+  /** Personas to target next round; empty means the full roster. Always empty for wait. */
+  personaIds: string[];
+  /** True when the next test concerns the visual or the headline-visual pairing. False for wait. */
+  needsNewCreative: boolean;
 }
 export interface LiquidUsageMetadata {
   promptTokens?: number;
@@ -33,6 +39,11 @@ export interface ExperimentDecisionWithMetadata {
   decision: ExperimentDecision;
   metadata: LiquidResponseMetadata;
 }
+export interface CreativeJudgeMedia {
+  bytes: Uint8Array;
+  contentType: 'image/png' | 'image/jpeg' | 'image/webp' | 'video/mp4';
+  mediaType: 'image' | 'video';
+}
 export interface CreativeJudgeContext {
   brief: string;
   personaCard: string;
@@ -41,6 +52,14 @@ export interface CreativeJudgeContext {
   siblingHeadlines: string[];
   mediaUrl?: string | null;
   mediaType?: 'image' | 'video' | null;
+  media?: CreativeJudgeMedia | null;
+  scrollContext?: {
+    surface: 'social_feed';
+    defaultAction: 'skip';
+    typicalClickRate: string;
+    typicalSignupRate: string;
+    rule: string;
+  };
 }
 export interface CreativeJudgmentWithMetadata {
   judgment: PersonaJudgment;
@@ -58,19 +77,40 @@ export const LIQUID_DEFAULT_MAX_TOKENS = 4_096;
 export const LIQUID_DEFAULT_TIMEOUT_MS = 60_000;
 export const LIQUID_MAX_TOKENS_LIMIT = 8_192;
 export const LIQUID_TIMEOUT_MS_LIMIT = 120_000;
+export const LIQUID_VISION_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+export const LIQUID_VISION_VIDEO_MAX_BYTES = 16 * 1024 * 1024;
 
 const DECISION_JSON_SCHEMA = {
   type: 'object',
   properties: {
     action: { type: 'string', enum: ['wait', 'propose_test'], description: 'Use wait when essential brief information is missing or review data is insufficient. A wait decision has hypothesis:"" and headlines:[].' },
-    explanation: { type: 'string', maxLength: 1_000, description: 'Give a concise reason grounded in the supplied brief, evidence, or lessons.' },
+    explanation: { type: 'string', maxLength: 300, description: 'Two or three short sentences grounded in the supplied brief, evidence, or lessons.' },
     hypothesis: { type: 'string', maxLength: 500, description: 'For wait, this must be exactly the empty string. For propose_test, state a testable proposal about headline directions without claiming headline-only effects.' },
-    headlines: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: HEADLINE_MAX_LENGTH, description: 'A final, ready-to-display ad headline in the brief language: a complete phrase, ideally 4–9 words and no more than 60 characters including spaces and punctuation. Keep explanations and hypotheses out of this field.' }, description: 'For wait, this must be an empty array with no placeholder words or old headlines. For propose_test, give 2 or 3 materially different final ad headlines, not summaries of directions.' },
+    headlines: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: HEADLINE_MAX_LENGTH, description: 'A final, ready-to-display ad headline in the brief language: a complete phrase, ideally 4–9 words and no more than 60 characters including spaces and punctuation. Keep explanations and hypotheses out of this field.' }, description: 'For wait, this must be an empty array with no placeholder words or old headlines. For propose_test, give 2 or 3 materially different, comparable final ad headlines, not summaries of directions.' },
     evidenceIds: { type: 'array', maxItems: 30, items: { type: 'string', maxLength: 100 } },
+    personaIds: { type: 'array', maxItems: 0, items: { type: 'string' }, description: 'For wait, an empty array. For propose_test, the supplied persona IDs the next round should target, or an empty array for every persona.' },
+    needsNewCreative: { type: 'boolean', description: 'For wait, false. For propose_test, true when the hypothesis concerns the visual or the headline-visual pairing; false when testing wording alone.' },
   },
-  required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds'],
+  required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds', 'personaIds', 'needsNewCreative'],
   additionalProperties: false,
 } as const;
+
+/**
+ * Persona IDs are constrained to an enum of the supplied IDs. As free-form strings, the small
+ * model can run out its whole completion budget without closing the JSON.
+ */
+function decisionJsonSchema(personaIds: string[]) {
+  const personaProperty = DECISION_JSON_SCHEMA.properties.personaIds;
+  return {
+    ...DECISION_JSON_SCHEMA,
+    properties: {
+      ...DECISION_JSON_SCHEMA.properties,
+      personaIds: personaIds.length
+        ? { ...personaProperty, maxItems: Math.min(40, personaIds.length), items: { type: 'string', enum: personaIds } }
+        : personaProperty,
+    },
+  };
+}
 
 const JUDGMENT_JSON_SCHEMA = {
   type: 'object',
@@ -129,7 +169,7 @@ export class LiquidClient {
             model: this.model,
             temperature: 0.1,
             max_tokens: this.maxTokens,
-            response_format: { type: 'json_schema', json_schema: { name: 'experiment_decision', strict: true, schema: DECISION_JSON_SCHEMA } },
+            response_format: { type: 'json_schema', json_schema: { name: 'experiment_decision', strict: true, schema: decisionJsonSchema(normalized.personas?.map(item => item.id) ?? []) } },
             provider: { require_parameters: true, allow_fallbacks: false },
             reasoning: { exclude: true },
             messages,
@@ -161,7 +201,12 @@ export class LiquidClient {
       if (typeof message.content !== 'string' || message.content.length > 16_000) throw new ProviderError('Liquid response content was invalid.', 'response');
       let parsed: unknown;
       try { parsed = JSON.parse(message.content); } catch { throw new ProviderError('Liquid returned malformed decision JSON.', 'response'); }
-      const decision = validateDecision(parsed, new Set(normalized.evidence.map(item => item.id)), normalized.brief);
+      const decision = validateDecision(
+        parsed,
+        new Set(normalized.evidence.map(item => item.id)),
+        new Set(normalized.personas?.map(item => item.id) ?? []),
+        normalized.brief,
+      );
       const usage = readUsageMetadata(payload.usage);
       const requestId = safeMetadataText(payload.id, 200);
       const model = safeMetadataText(payload.model, 160) ?? this.model;
@@ -190,7 +235,7 @@ export class LiquidClient {
       const headers: Record<string, string> = { 'content-type': 'application/json' };
       if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
       const url = new URL('chat/completions', this.base.href.endsWith('/') ? this.base : `${this.base.href}/`);
-      const messages = [{ role: 'system', content: judgeSystemPrompt }, { role: 'user', content: JSON.stringify(normalized) }];
+      const messages = [{ role: 'system', content: judgeSystemPrompt }, { role: 'user', content: judgeUserContent(normalized) }];
       const requestBody = this.openRouter
         ? {
             model: this.model,
@@ -220,6 +265,7 @@ export class LiquidClient {
       if (hasToolCalls(message.tool_calls) || (message.function_call !== undefined && message.function_call !== null)) {
         throw new ProviderError('Liquid response attempted to call a tool.', 'response');
       }
+      if (choice.finish_reason === 'length' && typeof message.content !== 'string') throw new ProviderError('Liquid response exhausted its completion token budget.', 'response');
       if (typeof message.content !== 'string' || message.content.length > 16_000) throw new ProviderError('Liquid response content was invalid.', 'response');
       let parsed: unknown;
       try { parsed = JSON.parse(message.content); } catch {
@@ -257,9 +303,9 @@ export class LiquidClient {
   }
 }
 
-const judgeSystemPrompt = 'You are a single fictional campaign viewer. Stay in the supplied persona. You receive JSON text only: you cannot see image pixels or watch video, and mediaUrl is a reference string rather than media input. Judge the assigned headline and campaign brief/copy only. Do not describe, score, or infer visual quality or media content. Do not write new headlines. Prefer headline, offer, or unsure for noticedFirst; never claim you saw an image or video from its URL. Return compact JSON only: action (skip, click, or signup), reason (one short sentence), dwellSeconds, timeToActionSeconds, confidence, attention, clarity, trust, purchaseIntent, noticedFirst, and friction. signup means you would join the waitlist. click means you would open the ad but not sign up. skip means you would ignore it. Scores are 0 to 1. Times are seconds from 0 to 60. Do not invent campaign results or claim this is a real customer. No tools.';
+const judgeSystemPrompt = 'You are this persona scrolling a social feed on their usual device. Most ads are skipped. Matching the campaign brief or product facts is not a reason to click or sign up. If an image or video is attached, inspect it with the headline and offer. If mediaAttached is false, judge copy only and do not invent visuals. Rate what this person felt: attention (did it stop the scroll), clarity, trust, purchaseIntent (would they want the product), and confidence. Use the full 0 to 1 range; do not default those scores to 0 and do not set confidence to 1 unless the reaction is obvious. Prefer skip. click means open the ad only. signup means they would join the waitlist now; that is rare. noticedFirst must be exactly one of: headline, image, offer, video, unsure. Use image or video only when you inspected attached media. friction must be exactly one of: price, trust, relevance, busy, none. reason must be one sentence from the persona about the ad, not about whether it matches a brief. Return compact JSON only: action, reason, dwellSeconds, timeToActionSeconds, confidence, attention, clarity, trust, purchaseIntent, noticedFirst, and friction. Times are seconds from 0 to 60. This is a simulation, not a real customer. No tools.';
 
-const systemPrompt = 'You are a cautious campaign experiment planner. Return only JSON with action (wait or propose_test), explanation, hypothesis, headlines, and evidenceIds. For wait, hypothesis must be the literal empty string and headlines must be the literal empty array; never put placeholder words, rationale, or old headlines in either field. Example wait shape: {"action":"wait","explanation":"<replace with the context-based reason>","hypothesis":"","headlines":[],"evidenceIds":[]}. Replace the explanation with an actual reason from this context; cite only supplied evidence IDs when relevant, otherwise use an empty evidenceIds array. For propose_test, output 2 or 3 final, ready-to-display ad headlines, not headline directions, summaries, or explanations. Each headline should be a complete phrase in the language of the brief, ideally 4–9 words and at most 60 characters including spaces and punctuation. Put rationale only in explanation and hypothesis. Make the final headlines materially different but comparable. The application may pair each headline with distinct media; when it does, the comparison is between complete headline-and-visual concepts, so do not attribute any outcome to the headline alone. Do not require the image or other creative elements to stay constant. First check that the brief supplies product, approved facts or claims, audience, and goal; if an essential element is missing, choose wait. Never claim a test won or that a proposed hypothesis is a result. Ground each claim only in an explicitly supplied approved fact or claim: do not turn repeated use or other context into unsupported durability, lifespan, savings, or environmental guarantees. Cite only supplied evidence IDs; do not invent IDs or evidence. No tools.';
+const systemPrompt = 'You are a cautious campaign experiment planner. Return only JSON with action (wait or propose_test), explanation, hypothesis, headlines, evidenceIds, personaIds, and needsNewCreative. For wait, hypothesis must be the literal empty string, headlines and personaIds must be literal empty arrays, and needsNewCreative must be false; never put placeholder words, rationale, or old headlines in any of them. Example wait shape: {"action":"wait","explanation":"<replace with the context-based reason>","hypothesis":"","headlines":[],"evidenceIds":[],"personaIds":[],"needsNewCreative":false}. Replace the explanation with an actual reason from this context in two or three short sentences; cite only supplied evidence IDs when relevant, otherwise use an empty evidenceIds array. For propose_test, output 2 or 3 final, ready-to-display ad headlines, not summaries or explanations. Each headline should be a complete phrase in the language of the brief, ideally 4–9 words and no more than 60 characters including spaces and punctuation. Keep rationale only in explanation and hypothesis. Make the headlines materially different but comparable. The application may pair each headline with distinct media; when it does, the comparison is between complete headline-and-visual concepts, so do not attribute any outcome to the headline alone and do not require the image or other creative elements to stay constant. Set needsNewCreative to true when the hypothesis concerns the visual or how each headline pairs with its visual, and false when testing wording alone. When personas are supplied, personaIds may name the ones whose evidence makes them worth testing next; use only supplied persona IDs, and use an empty array to test every persona. For wait, personaIds must be empty and needsNewCreative false. First check that the brief supplies product, approved facts or claims, audience, and goal; if an essential element is missing, choose wait. Never claim a test won or that a proposed hypothesis is a result. Ground each claim only in an explicitly supplied approved fact or claim: do not turn repeated use or other context into unsupported durability, lifespan, savings, or environmental guarantees. Cite only supplied evidence IDs; do not invent IDs or evidence. No tools.';
 
 function stagePolicy(stage: ExperimentContext['stage']): string {
   if (stage === 'initial') return 'STAGE POLICY — INITIAL: When product, approved facts or claims, audience, and goal are present, propose a first controlled test. Historical performance observations are not required; do not wait solely because none exist.';
@@ -319,13 +365,15 @@ function validateContext(context: ExperimentContext): ExperimentContext {
   const evidence = context.evidence.map(item => ({ id: boundedText(item?.id, 'evidence id', 100), summary: boundedText(item?.summary, 'evidence summary', 500) }));
   const lessons = context.lessons.map(item => ({ id: boundedText(item?.id, 'lesson id', 100), statement: boundedText(item?.statement, 'lesson statement', 500) }));
   if (new Set(evidence.map(item => item.id)).size !== evidence.length) throw new ProviderError('Evidence IDs must be unique.', 'configuration');
-  return { brief, evidence, lessons, ...(context.stage === undefined ? {} : { stage: context.stage }) };
+  if (context.personas !== undefined && (!Array.isArray(context.personas) || context.personas.length > 64)) throw new ProviderError('Liquid context exceeds limits.', 'configuration');
+  const personas = context.personas?.map(item => ({ id: boundedText(item?.id, 'persona id', 100), label: boundedText(item?.label, 'persona label', 120) }));
+  return { brief, evidence, lessons, ...(personas ? { personas } : {}), ...(context.stage === undefined ? {} : { stage: context.stage }) };
 }
 
-function validateDecision(value: unknown, suppliedEvidence: Set<string>, brief: string): ExperimentDecision {
+function validateDecision(value: unknown, suppliedEvidence: Set<string>, suppliedPersonas: Set<string>, brief: string): ExperimentDecision {
   const v = object(value, 'Liquid returned an invalid decision.');
   if (v.action !== 'wait' && v.action !== 'propose_test') throw new ProviderError('Liquid decision action is invalid.', 'response');
-  const explanation = boundedText(v.explanation, 'explanation', 1_000);
+  const explanation = boundedText(v.explanation, 'explanation', 300);
   let hypothesis: string;
   let headlines: string[];
   if (v.action === 'wait') {
@@ -347,7 +395,14 @@ function validateDecision(value: unknown, suppliedEvidence: Set<string>, brief: 
     }
   }
   if (!Array.isArray(v.evidenceIds) || v.evidenceIds.length > 30 || v.evidenceIds.some(id => typeof id !== 'string' || !suppliedEvidence.has(id))) throw new ProviderError('Liquid decision cited evidence that was not supplied.', 'response');
-  return { action: v.action, explanation, hypothesis, headlines, evidenceIds: [...new Set(v.evidenceIds as string[])] };
+  // The JSON-object fallback path has no schema, so absent fields default to "all personas" and
+  // "reuse creative"; present fields are held to the same rules as the strict schema.
+  const personaIds = v.personaIds ?? [];
+  if (!Array.isArray(personaIds) || personaIds.length > 40 || personaIds.some(id => typeof id !== 'string' || !suppliedPersonas.has(id))) throw new ProviderError('Liquid decision named personas that were not supplied.', 'response');
+  const needsNewCreative = v.needsNewCreative ?? false;
+  if (typeof needsNewCreative !== 'boolean') throw new ProviderError('Liquid decision needsNewCreative must be a boolean.', 'response');
+  if (v.action === 'wait' && (personaIds.length !== 0 || needsNewCreative)) throw new ProviderError('Liquid wait decisions must not propose creative.', 'response');
+  return { action: v.action, explanation, hypothesis, headlines, evidenceIds: [...new Set(v.evidenceIds as string[])], personaIds: [...new Set(personaIds as string[])], needsNewCreative };
 }
 
 function hasLatinLetter(value: string): boolean {
@@ -361,6 +416,7 @@ function hasNonLatinLetter(value: string): boolean {
 function validateJudgeContext(context: CreativeJudgeContext): CreativeJudgeContext {
   const siblingHeadlines = Array.isArray(context.siblingHeadlines) ? context.siblingHeadlines.map((headline) => boundedText(headline, 'sibling headline', 120)) : [];
   if (siblingHeadlines.length > 3) throw new ProviderError('Judge context exceeds headline limits.', 'configuration');
+  const mediaType = context.mediaType === 'image' || context.mediaType === 'video' ? context.mediaType : null;
   return {
     brief: boundedText(context?.brief, 'brief', 4_000),
     personaCard: boundedText(context?.personaCard, 'persona card', 500),
@@ -368,32 +424,107 @@ function validateJudgeContext(context: CreativeJudgeContext): CreativeJudgeConte
     assignedHeadline: boundedText(context?.assignedHeadline, 'assigned headline', 120),
     siblingHeadlines,
     mediaUrl: context.mediaUrl ? boundedText(context.mediaUrl, 'media URL', 500) : null,
-    mediaType: context.mediaType === 'image' || context.mediaType === 'video' ? context.mediaType : null,
+    mediaType,
+    media: validateJudgeMedia(context.media, mediaType),
+    scrollContext: {
+      surface: 'social_feed',
+      defaultAction: 'skip',
+      typicalClickRate: 'low',
+      typicalSignupRate: 'rare',
+      rule: 'Matching the product brief is not a reason to click or sign up.',
+    },
   };
+}
+
+function validateJudgeMedia(media: CreativeJudgeContext['media'], mediaType: CreativeJudgeContext['mediaType']): CreativeJudgeMedia | null {
+  if (!media) return null;
+  const contentType = media.contentType;
+  const type = media.mediaType;
+  if ((type !== 'image' && type !== 'video') || (mediaType !== null && type !== mediaType)) {
+    throw new ProviderError('Judge media type is invalid.', 'configuration');
+  }
+  if (type === 'image' && contentType !== 'image/png' && contentType !== 'image/jpeg' && contentType !== 'image/webp') {
+    throw new ProviderError('Judge image content type is invalid.', 'configuration');
+  }
+  if (type === 'video' && contentType !== 'video/mp4') throw new ProviderError('Judge video content type is invalid.', 'configuration');
+  const bytes = media.bytes;
+  if (!bytes || bytes.byteLength === 0) throw new ProviderError('Judge media is empty.', 'configuration');
+  const maxBytes = type === 'video' ? LIQUID_VISION_VIDEO_MAX_BYTES : LIQUID_VISION_IMAGE_MAX_BYTES;
+  if (bytes.byteLength > maxBytes) throw new ProviderError('Judge media exceeds the vision size limit.', 'configuration');
+  return { bytes, contentType, mediaType: type };
+}
+
+function judgeUserContent(context: CreativeJudgeContext): string | Array<Record<string, unknown>> {
+  const { media, ...textContext } = context;
+  const text = JSON.stringify({ ...textContext, mediaAttached: media !== null });
+  if (!media) return text;
+  const dataUrl = `data:${media.contentType};base64,${Buffer.from(media.bytes).toString('base64')}`;
+  const visual = media.mediaType === 'video'
+    ? { type: 'video_url', video_url: { url: dataUrl } }
+    : { type: 'image_url', image_url: { url: dataUrl } };
+  return [{ type: 'text', text }, visual];
 }
 
 function validateJudgment(value: unknown): PersonaJudgment {
   const v = object(value, 'Liquid returned an invalid persona judgment.');
-  if (v.action !== 'skip' && v.action !== 'click' && v.action !== 'signup') throw new ProviderError('Persona action is invalid.', 'response');
-  const noticed = v.noticedFirst;
-  if (noticed !== 'headline' && noticed !== 'image' && noticed !== 'offer' && noticed !== 'video' && noticed !== 'unsure') {
-    throw new ProviderError('Persona noticedFirst is invalid.', 'response');
-  }
-  const friction = v.friction;
-  if (friction !== 'price' && friction !== 'trust' && friction !== 'relevance' && friction !== 'busy' && friction !== 'none') {
-    throw new ProviderError('Persona friction is invalid.', 'response');
-  }
+  const action = normalizeAction(firstScalar(v.action ?? v.decision));
   return {
-    action: v.action,
+    action,
     reason: boundedText(v.reason, 'reason', 300),
-    dwellSeconds: clampRange(Number(v.dwellSeconds), 0, 60),
-    timeToActionSeconds: clampRange(Number(v.timeToActionSeconds), 0, 60),
-    confidence: clampUnit(Number(v.confidence)),
-    attention: clampUnit(Number(v.attention)),
-    clarity: clampUnit(Number(v.clarity)),
-    trust: clampUnit(Number(v.trust)),
-    purchaseIntent: clampUnit(Number(v.purchaseIntent)),
-    noticedFirst: noticed,
-    friction,
+    dwellSeconds: clampRange(Number(v.dwellSeconds ?? v.dwell_seconds), 0, 60),
+    timeToActionSeconds: clampRange(Number(v.timeToActionSeconds ?? v.time_to_action_seconds), 0, 60),
+    confidence: unitScore(v.confidence),
+    attention: unitScore(v.attention),
+    clarity: unitScore(v.clarity),
+    trust: unitScore(v.trust),
+    purchaseIntent: unitScore(v.purchaseIntent ?? v.purchase_intent),
+    noticedFirst: normalizeNoticedFirst(firstScalar(v.noticedFirst ?? v.noticed_first)),
+    friction: normalizeFriction(firstScalar(v.friction)),
   };
+}
+
+function unitScore(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return clampUnit(numeric > 1 && numeric <= 10 ? numeric / 10 : numeric);
+}
+
+function firstScalar(value: unknown): unknown {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function normalizeToken(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ');
+}
+
+function normalizeAction(value: unknown): PersonaAction {
+  const token = normalizeToken(value);
+  if (token === 'signup' || token === 'sign up' || token === 'join' || token === 'waitlist') return 'signup';
+  if (token === 'click' || token === 'open' || token === 'tap') return 'click';
+  if (token === 'skip' || token === 'ignore' || token === 'pass') return 'skip';
+  throw new ProviderError('Persona action is invalid.', 'response');
+}
+
+function normalizeNoticedFirst(value: unknown): NoticedFirst {
+  const token = normalizeToken(value);
+  if (token === 'headline' || token === 'the headline' || token === 'headlines' || token === 'text' || token === 'copy' || token === 'title') return 'headline';
+  if (token === 'image' || token === 'the image' || token === 'photo' || token === 'the photo' || token === 'picture' || token === 'visual' || token === 'graphic' || token === 'product') return 'image';
+  if (token === 'offer' || token === 'the offer' || token === 'waitlist' || token === 'cta') return 'offer';
+  if (token === 'video' || token === 'the video' || token === 'clip' || token === 'the clip') return 'video';
+  if (token === 'unsure' || token === 'not sure' || token === 'unknown' || token === 'none' || token === '') return 'unsure';
+  if (token.includes('video') || token.includes('clip')) return 'video';
+  if (token.includes('image') || token.includes('photo') || token.includes('picture') || token.includes('visual')) return 'image';
+  if (token.includes('headline') || token.includes('title') || token.includes('copy')) return 'headline';
+  if (token.includes('offer') || token.includes('waitlist')) return 'offer';
+  return 'unsure';
+}
+
+function normalizeFriction(value: unknown): PersonaFriction {
+  const token = normalizeToken(value);
+  if (token === 'price' || token === 'cost' || token === 'expensive') return 'price';
+  if (token === 'trust' || token === 'credibility' || token === 'skeptical') return 'trust';
+  if (token === 'relevance' || token === 'relevant' || token === 'not relevant' || token === 'off topic') return 'relevance';
+  if (token === 'busy' || token === 'no time' || token === 'rushed') return 'busy';
+  return 'none';
 }

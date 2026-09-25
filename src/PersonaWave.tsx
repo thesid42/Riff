@@ -201,7 +201,7 @@ export default function PersonaWave({
         <div>
           <span className="section-kicker">PERSONA EXPERIMENT</span>
           <h2 id="wave-title">Experiment setup</h2>
-          <p>Choose an audience and run a copy-only simulation.</p>
+          <p>Choose an audience and simulate how people respond to your ad.</p>
         </div>
         <span className={`status-pill ${runtime === 'running' ? 'wave-running' : ''}`}>
           <span className="status-dot" /> {statusLabel}
@@ -225,7 +225,7 @@ export default function PersonaWave({
             ? `Shorten headlines to ${HEADLINE_MAX_LENGTH} characters or fewer in Campaign before starting.`
             : `Add 2–3 unique, non-empty headlines of up to ${HEADLINE_MAX_LENGTH} characters in Campaign before starting.`}</p>
         )}
-        <p className="experiment-copy-note">This simulation evaluates headline copy only. It does not inspect images or videos.</p>
+        <p className="experiment-copy-note">{creativeJobId ? 'Agents inspect the selected image or video with its headline, then simulate skipping, clicking, or signing up.' : 'With no creative selected, agents evaluate headline copy only.'}</p>
         <div className="wave-visual-note" role="status">
         {creativeJobId
           ? <>A saved creative is selected for the next wave. <button type="button" className="text-button" onClick={onClearCreative}>Remove creative</button></>

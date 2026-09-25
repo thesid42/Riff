@@ -32,7 +32,7 @@ export default function ExperimentResults({ experiments, variants, metrics, curr
     <section className="experiment-results" aria-labelledby="experiment-results-title">
       <div className="experiment-results-heading">
         <div><span className="section-kicker">RECORDED RESULTS</span><h2 id="experiment-results-title">Latest experiment</h2></div>
-        <span className="experiment-simulation-label">Simulated audience · headline test</span>
+        <span className="experiment-simulation-label">Simulated audience experiment</span>
       </div>
       {latest ? <ExperimentRecord key={latest.id} experiment={latest} variants={variantsForExperiment(latest, variants)} metrics={metrics} /> : (
         <div className="experiment-results-empty"><FlaskConical size={22} /><div><h3>{currentExperimentId ? 'Loading this wave’s versions…' : 'No waves yet'}</h3><p>{currentExperimentId ? 'The saved versions will appear as this wave starts.' : 'Start a wave above to compare how simulated profiles respond to your headlines.'}</p></div></div>
@@ -57,7 +57,7 @@ function ExperimentRecord({ experiment, variants, metrics, historical = false }:
     <div className="experiment-record-header"><span>{timestamp(experiment.createdAt)}</span><span className="record-status">{experiment.status === 'collecting' ? 'Collecting responses' : experiment.status.charAt(0).toUpperCase() + experiment.status.slice(1)}</span></div>
     <p className="experiment-record-explanation">{textOnly
       ? 'Text-only experiment. No visual was selected when this wave started. Images generated later stay in Campaign.'
-      : 'These are the versions saved when the wave started. The simulation evaluates headline copy; attached visuals are for your review.'}</p>
+      : 'These are the headlines and visuals saved when the wave started. Open each visual to review the exact version used.'}</p>
     <div className="experiment-version-grid">{variants.map((variant) => {
       const totals = matchingMetrics?.variants.find((entry) => entry.variantId === variant.id)?.totals;
       const kind = variant.videoUrl ? 'video' : 'image';

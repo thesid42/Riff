@@ -38,6 +38,8 @@
 .signup-chart-empty strong { color: #405045; font-size: 14px; }
 .signup-chart-empty span { max-width: 320px; font-size: 12px; line-height: 1.45; }
 .chart-panel-explained .chart-footnote { margin-top: 4px; }
+.round-history > .round-chart-grid { padding: 0 18px 18px; }
+.round-chart { min-width: 0; }
 
 @media (max-width: 560px) {
   .signup-chart-svg { min-height: 220px; }

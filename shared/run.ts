@@ -82,7 +82,24 @@ export interface DecisionRecord {
   hypothesis: string;
   headlines: string[];
   evidenceIds: string[];
+  /** Personas Liquid asked the next round to target; empty means the full roster. */
+  personaIds: string[];
+  /** Whether Liquid asked for new creative at step 3 of the next round. */
+  needsNewCreative: boolean;
+  /** What step 3 actually did for the round this decision started, or null if none followed. */
+  creativeOutcome: CreativeOutcome | null;
   createdAt: string;
+}
+
+/** new: generated for this round; reused: carried from the previous round; text-only: no media. */
+export type CreativeOutcome = 'new' | 'reused' | 'text-only';
+
+/** What a round ran against, so each "Results by round" card can show its creative and audience. */
+export interface RoundSummary {
+  /** initial for the manually started round; otherwise what step 3 did for this round. */
+  creative: 'initial' | CreativeOutcome;
+  personas: Array<{ id: string; label: string }>;
+  media: Array<{ label: string; headline: string; imageUrl: string | null; videoUrl: string | null }>;
 }
 
 export interface WaveProgress {
@@ -134,6 +151,23 @@ export interface WaveSnapshot {
   lastError: string | null;
   ingestError: string | null;
   reviewError: string | null;
+  /** Why the auto-run loop stopped, so the UI can explain it instead of going quiet. */
+  loopStatus: LoopStatus | null;
+}
+
+export type LoopStopReason = 'threshold_met' | 'round_cap' | 'paused' | 'review_failed' | 'rules_failed' | 'creative_failed';
+
+export interface LoopStatus {
+  reason: LoopStopReason;
+  round: number;
+  maxRounds: number;
+  message: string;
+  /** Best observed click rate and the metrics source it was judged from. */
+  bestClickRate: number | null;
+  threshold: number;
+  metricsSource: 'rawtree' | 'tinybird' | 'sqlite' | 'none';
+  /** Set when the last chained round reused creative because no generator was available. */
+  creativeNote?: string;
 }
 
 export function emptyWaveProgress(): WaveProgress {
@@ -154,6 +188,7 @@ export function emptyWaveSnapshot(agentCount = DEFAULT_AGENT_COUNT, concurrency 
     lastError: null,
     ingestError: null,
     reviewError: null,
+    loopStatus: null,
   };
 }
 

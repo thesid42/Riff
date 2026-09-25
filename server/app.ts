@@ -9,9 +9,16 @@ import { persistHeadlinesSchema, runWaveSchema } from '../shared/run.js';
 import { createCustomPersona, customPersonaSchema } from '../shared/personas.js';
 import { creativeImageRequestSchema, creativeVideoRequestSchema } from '../shared/creative.js';
 import { CampaignDatabase } from './database.js';
-import { createProviders, getIntegrationStatuses, type Providers } from './providers/index.js';
+import { createProviders, getIntegrationStatuses, readAutoCreativeEnabled, readMaxAutoRounds, readSuccessClickRate, type Providers } from './providers/index.js';
 import { CreativeService, CreativeServiceError } from './creative.js';
 import { ExperimentRunService, RunServiceError } from './experiment-run.js';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** Resolves once every detached media job has settled. */
+    waitForCreativeIdle(): Promise<void>;
+  }
+}
 
 export interface CreateAppOptions {
   databasePath?: string;
@@ -20,6 +27,13 @@ export interface CreateAppOptions {
   providers?: Partial<Pick<Providers, 'liquid' | 'analytics' | 'bfl' | 'video' | 'videoEnabled'>>;
   bflModel?: string;
   bflVideoModel?: string;
+  successClickRate?: number;
+  maxAutoRounds?: number;
+  /** Lets chained rounds generate new images. Defaults to AUTO_CREATIVE_ENABLED. */
+  autoCreative?: boolean;
+  /** Overrides how long and how often the loop waits on generated images; used by tests. */
+  creativeTimeoutMs?: number;
+  creativePollMs?: number;
 }
 
 export function createApp(options: CreateAppOptions = {}): FastifyInstance {
@@ -40,6 +54,14 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     database,
     liquid: providers.liquid,
     analytics: providers.analytics,
+    successClickRate: options.successClickRate ?? readSuccessClickRate(),
+    maxAutoRounds: options.maxAutoRounds ?? readMaxAutoRounds(),
+    // Without BFL the service cannot generate, so the loop is told there is no generator at all.
+    creative: providers.bfl && (options.autoCreative ?? readAutoCreativeEnabled()) ? creative : undefined,
+    creativeTimeoutMs: options.creativeTimeoutMs,
+    creativePollMs: options.creativePollMs,
+    // Persona judges read stored media through the same service, whether or not BFL is configured.
+    assets: creative,
   });
   database.markInterruptedCreativeJobs(new Date().toISOString());
   runner.recover();
@@ -114,6 +136,12 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     const campaign = database.getCampaign(request.params.id);
     if (!campaign) return notFound(reply, 'Campaign');
     return runner.metrics(campaign);
+  });
+
+  app.get<{ Params: { id: string } }>('/api/campaigns/:id/metrics/rounds', async (request, reply) => {
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    return { rounds: await runner.rounds(campaign) };
   });
 
   app.get<{ Params: { id: string } }>('/api/campaigns/:id/wave', async (request, reply) => {
@@ -311,6 +339,9 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     const safeError = clientErrors[statusCode] ?? { code: 'internal_error', message: 'The request could not be completed.' };
     return reply.code(statusCode).send({ error: safeError });
   });
+
+  // Media jobs run detached from their HTTP request, so tests need a way to await them.
+  app.decorate('waitForCreativeIdle', () => creative.waitForIdle());
 
   app.addHook('preClose', async () => {
     await Promise.all([runner.close(), creative.close()]);

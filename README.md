@@ -25,11 +25,13 @@ Implemented:
 - Simulated responses, progress, decisions, and lessons are saved locally; configured analytics adapters ingest and summarize simulated events. These are model-generated responses, not measurements from real customers.
 - Server-side adapter foundations for Liquid AI, RawTree, classic Tinybird, and Black Forest Labs.
 - Empty analytics shown as not started; rates and costs without outcomes shown as “—”.
-- The sign-up graph shows cumulative **simulated** outcomes from the latest persona wave. Its horizontal axis is elapsed time and its vertical axis is sign-up count. Steps represent recorded outcomes; the legend identifies each headline, including versions with zero sign-ups. The source is local persona judgments; analytics providers are export destinations.
+- The sign-up graph shows cumulative **simulated** outcomes from the latest persona wave. Its horizontal axis is elapsed time and its vertical axis is sign-up count. Steps represent recorded outcomes; the legend identifies each headline, including versions with zero sign-ups. Metrics identify their actual analytics source, including SQLite fallback. Results by round preserve the history of the experiment loop.
 
 Opening the app and saving a draft do not contact providers. Headline suggestions call Liquid; generating media uses BFL credits; starting or resuming a wave runs Liquid persona requests and sends analytics events. Integration status reports local configuration; it does not verify provider connectivity.
 
-The current persona judge receives text only. It can assess supplied copy and product facts, but it cannot inspect generated image pixels or watch videos. Distinct visuals are preserved for human review; simulated results do not establish visual effectiveness or isolate the effect of a headline when complete concepts differ.
+When a ready creative is selected, persona judges receive its stored image or video together with the headline and product facts. Without a selected creative, they evaluate text only. A feed-scroll model translates responses into simulated skips, clicks and sign-ups. These remain synthetic predictions; they do not establish real ad effectiveness or isolate a headline's effect when complete concepts differ.
+
+The experiment loop can continue with revised headlines, audience profiles and creative according to its configured limits. `MAX_AUTO_ROUNDS`, `SUCCESS_CLICK_RATE_THRESHOLD` and `AUTO_CREATIVE_ENABLED` control the stopping rules and whether following rounds may generate new images. Starting a wave authorizes the configured loop; opening the app does not start it.
 
 Creative batches persist each version's progress. If a request fails or has an unknown outcome, remaining versions stop and successful outputs stay viewable. Reloading progress does not submit another paid request, and interrupted requests are never automatically resubmitted.
 

@@ -48,7 +48,7 @@ export default function SignupChart({ metrics, variants, loading }: {
       : `The latest recorded total is ${plural(model.totalSignups, 'simulated sign-up')} across ${plural(model.tracks.length, 'version')} through ${observedThrough}.`;
 
   return <div className="signup-chart" aria-label="Local persona simulation results">
-    <p className="signup-chart-scope">Local simulated persona judgments from the latest wave. These are not live customer sign-ups or ad performance.</p>
+    <p className="signup-chart-scope">Simulated persona responses for this wave. These are not live customer sign-ups or ad performance.</p>
     <p className="signup-chart-takeaway" role="status">{summary}</p>
     {loading && !model.hasData ? <div className="signup-chart-empty" role="status">Loading persona-wave results…</div> : !model.hasData ?
       <div className="signup-chart-empty" role="status"><strong>No wave results yet</strong><span>Start an experiment to record simulated sign-ups by version.</span></div> : <>

@@ -25,8 +25,10 @@ export {
   LIQUID_DEFAULT_TIMEOUT_MS,
   LIQUID_MAX_TOKENS_LIMIT,
   LIQUID_TIMEOUT_MS_LIMIT,
+  LIQUID_VISION_IMAGE_MAX_BYTES,
+  LIQUID_VISION_VIDEO_MAX_BYTES,
 } from './liquid.js';
-export type { CreativeJudgeContext, CreativeJudgmentWithMetadata, ExperimentContext, ExperimentDecision, ExperimentDecisionWithMetadata, LiquidClientConfig, LiquidResponseMetadata, LiquidUsageMetadata } from './liquid.js';
+export type { CreativeJudgeContext, CreativeJudgeMedia, CreativeJudgmentWithMetadata, ExperimentContext, ExperimentDecision, ExperimentDecisionWithMetadata, LiquidClientConfig, LiquidResponseMetadata, LiquidUsageMetadata } from './liquid.js';
 export { ProviderError } from './common.js';
 
 export interface Providers { liquid?: LiquidClient; analytics?: AnalyticsClient; bfl?: BflClient; video?: BflVideoClient; videoEnabled: boolean; }
@@ -107,6 +109,39 @@ export function createProviders(env: NodeJS.ProcessEnv = process.env, fetchImpl:
 }
 
 function value(input: string | undefined): string | undefined { return input?.trim() || undefined; }
+export const DEFAULT_SUCCESS_CLICK_RATE = 0.7;
+export const DEFAULT_MAX_AUTO_ROUNDS = 3;
+
+/**
+ * Reads the click-rate at which the auto-run loop stops early. Expressed as a fraction in
+ * (0, 1]. Note this is judged from LLM persona decisions, not human traffic, so the default
+ * sits far above real-world click-through rates.
+ */
+export function readSuccessClickRate(env: NodeJS.ProcessEnv = process.env): number {
+  const input = value(env.SUCCESS_CLICK_RATE_THRESHOLD);
+  if (input === undefined || input === '') return DEFAULT_SUCCESS_CLICK_RATE;
+  const parsed = Number(input.trim());
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 1) {
+    throw new ProviderError('SUCCESS_CLICK_RATE_THRESHOLD must be a number greater than 0 and at most 1.', 'configuration');
+  }
+  return parsed;
+}
+
+export function readMaxAutoRounds(env: NodeJS.ProcessEnv = process.env): number {
+  return readIntegerSetting(env.MAX_AUTO_ROUNDS, DEFAULT_MAX_AUTO_ROUNDS, 1, 20, 'MAX_AUTO_ROUNDS');
+}
+
+/**
+ * Whether chained rounds may generate new images with BFL. On by default, since new creative per
+ * round is what the loop is for; set AUTO_CREATIVE_ENABLED=false to exercise it without image spend.
+ */
+export function readAutoCreativeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const input = value(env.AUTO_CREATIVE_ENABLED)?.toLowerCase();
+  if (input === undefined || input === 'true') return true;
+  if (input === 'false') return false;
+  throw new ProviderError('AUTO_CREATIVE_ENABLED must be true or false.', 'configuration');
+}
+
 function readIntegerSetting(input: string | undefined, fallback: number, min: number, max: number, name: string): number {
   if (input === undefined || input === '') return fallback;
   const clean = input.trim();

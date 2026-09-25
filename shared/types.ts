@@ -88,7 +88,8 @@ export interface DerivedMetrics {
 
 export interface MetricsSnapshot {
   campaignId: string;
-  source: 'none' | 'rawtree' | 'tinybird';
+  /** Which path actually produced these numbers, so a silent fallback stays visible. */
+  source: 'none' | 'rawtree' | 'tinybird' | 'sqlite';
   status: 'not_started' | 'available' | 'unavailable';
   window: { label: string; start: string | null; end: string | null };
   updatedAt: string | null;

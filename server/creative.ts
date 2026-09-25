@@ -9,7 +9,7 @@ import { CampaignDatabase, type StoredCreativeImageJob, type StoredCreativeVaria
 
 const IMAGE_WIDTH = 1_024;
 const IMAGE_HEIGHT = 1_024;
-const IMAGE_TIMEOUT_MS = 120_000;
+export const IMAGE_TIMEOUT_MS = 120_000;
 const VIDEO_TIMEOUT_MS = 300_000;
 const POLL_INTERVAL_MS = 1_500;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
@@ -135,13 +135,20 @@ export class CreativeService {
     if (signal?.aborted) controller.abort(signal.reason);
     else signal?.addEventListener('abort', () => controller.abort(signal.reason), { once: true });
     this.activeControllers.add(controller);
-    const task = Promise.resolve().then(() => run(reserved.job, controller.signal));
+    // The job runs detached so the HTTP response returns immediately. Callers poll
+    // GET /api/campaigns/:id/creative for the stored status instead of holding the request open.
+    const task = Promise.resolve().then(() => run(reserved.job, controller.signal)).catch(() => undefined);
     this.activeTasks.add(task);
-    try { return publicCreativeJob(await task); }
-    finally {
+    void task.finally(() => {
       this.activeControllers.delete(controller);
       this.activeTasks.delete(task);
-    }
+    });
+    return publicCreativeJob(reserved.job);
+  }
+
+  /** Resolves once every in-flight media job has settled. Used by tests and shutdown. */
+  async waitForIdle(): Promise<void> {
+    while (this.activeTasks.size > 0) await Promise.allSettled([...this.activeTasks]);
   }
 
   async getAsset(jobId: string): Promise<CreativeAsset | undefined> {
@@ -172,7 +179,7 @@ export class CreativeService {
   async close(): Promise<void> {
     this.closing = true;
     for (const controller of this.activeControllers) controller.abort(new Error('Server shutdown'));
-    await Promise.allSettled([...this.activeTasks]);
+    await this.waitForIdle();
   }
 
   private async runDistinctJob(job: StoredCreativeImageJob, signal: AbortSignal): Promise<StoredCreativeImageJob> {

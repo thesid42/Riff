@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { LiquidClient, LIQUID_DEFAULT_MAX_TOKENS, LIQUID_DEFAULT_TIMEOUT_MS, isOpenRouterBaseUrl, type ExperimentDecision } from '../server/providers/liquid.js';
+import { LiquidClient, LIQUID_DEFAULT_MAX_TOKENS, LIQUID_DEFAULT_TIMEOUT_MS, LIQUID_VISION_IMAGE_MAX_BYTES, isOpenRouterBaseUrl, type ExperimentDecision } from '../server/providers/liquid.js';
 import { createProviders, getIntegrationStatuses } from '../server/providers/index.js';
 import { countHeadlineCharacters, HEADLINE_MAX_LENGTH, isStoredHeadlineSet, isValidHeadlineSet, LEGACY_HEADLINE_MAX_LENGTH } from '../shared/headlines.js';
 
@@ -17,6 +17,8 @@ const decision: ExperimentDecision = {
   hypothesis: 'A direct time-saving headline may improve signups.',
   headlines: ['Organize feedback in less time', 'Keep team feedback organized'],
   evidenceIds: ['exp-1-variant-a'],
+  personaIds: [],
+  needsNewCreative: false,
 };
 
 afterEach(() => vi.useRealTimers());
@@ -68,7 +70,7 @@ describe('OpenRouter Liquid adapter', () => {
           name: 'experiment_decision',
           strict: true,
           schema: {
-            required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds'],
+            required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds', 'personaIds', 'needsNewCreative'],
             additionalProperties: false,
           },
         },
@@ -173,7 +175,7 @@ describe('OpenRouter Liquid adapter', () => {
     expect(result.decision).toEqual(decision);
     expect(JSON.parse(requestBody?.messages[1].content as string)).toMatchObject({ stage });
     expect(requestBody?.messages[0].content).toContain(policy);
-    expect(requestBody?.response_format.json_schema.schema.required).toEqual(['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds']);
+    expect(requestBody?.response_format.json_schema.schema.required).toEqual(['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds', 'personaIds', 'needsNewCreative']);
   });
 
   it('preserves omitted stage compatibility and rejects an invalid stage before making a request', async () => {
@@ -216,7 +218,7 @@ describe('OpenRouter Liquid adapter', () => {
 
   it('accepts a clean wait and rejects any wait that includes hypothesis text or headlines', async () => {
     const cleanWait: ExperimentDecision = {
-      action: 'wait', explanation: 'The brief does not specify a campaign goal.', hypothesis: '', headlines: [], evidenceIds: [],
+      action: 'wait', explanation: 'The brief does not specify a campaign goal.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: [], needsNewCreative: false,
     };
     const validClient = client(async () => openRouterResponse({ content: JSON.stringify(cleanWait) }));
     await expect(validClient.proposeExperiment(context)).resolves.toEqual(cleanWait);
@@ -224,6 +226,7 @@ describe('OpenRouter Liquid adapter', () => {
     for (const malformed of [
       { ...cleanWait, hypothesis: 'Try a brighter promise.' },
       { ...cleanWait, headlines: ['Built to Last'] },
+      { ...cleanWait, needsNewCreative: true },
     ]) {
       const invalidClient = client(async () => openRouterResponse({ content: JSON.stringify(malformed) }));
       await expect(invalidClient.proposeExperiment(context)).rejects.toMatchObject({
@@ -279,6 +282,29 @@ describe('OpenRouter Liquid adapter', () => {
     });
   });
 
+  it('accepts only supplied persona IDs, requires none for wait, and sends the persona whitelist', async () => {
+    const withPersonas = { ...context, personas: [{ id: 'us-chi-manager', label: 'Chicago manager' }], stage: 'review' as const };
+    let requestBody: Record<string, any> | undefined;
+    const targeted = { ...decision, personaIds: ['us-chi-manager'], needsNewCreative: true };
+    const validClient = client(async (_input, init = {}) => {
+      requestBody = JSON.parse(String(init.body)) as Record<string, any>;
+      return openRouterResponse({ content: JSON.stringify(targeted) });
+    });
+    await expect(validClient.proposeExperiment(withPersonas)).resolves.toEqual(targeted);
+    expect(JSON.parse(requestBody?.messages[1].content as string).personas).toEqual(withPersonas.personas);
+
+    const fixtures = [
+      { name: 'unsupplied persona', context: withPersonas, content: { ...decision, personaIds: ['not-supplied'] }, message: 'Liquid decision named personas that were not supplied.' },
+      { name: 'persona without a whitelist', context, content: { ...decision, personaIds: ['us-chi-manager'] }, message: 'Liquid decision named personas that were not supplied.' },
+      { name: 'wait naming personas', context: withPersonas, content: { action: 'wait', explanation: 'Too little data.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: ['us-chi-manager'], needsNewCreative: false }, message: 'Liquid wait decisions must not propose creative.' },
+      { name: 'non-boolean creative flag', context: withPersonas, content: { ...decision, needsNewCreative: 'yes' }, message: 'Liquid decision needsNewCreative must be a boolean.' },
+    ];
+    for (const fixture of fixtures) {
+      const clientUnderTest = client(async () => openRouterResponse({ content: JSON.stringify(fixture.content) }));
+      await expect(clientUnderTest.proposeExperiment(fixture.context), fixture.name).rejects.toMatchObject({ code: 'response', message: fixture.message });
+    }
+  });
+
   it('requires a stop finish reason for OpenRouter but preserves legacy local JSON-object responses', async () => {
     const missingOpenRouterFinish = client(async () => openRouterResponse({ choice: { finish_reason: undefined } }));
     await expect(missingOpenRouterFinish.proposeExperiment(context)).rejects.toMatchObject({
@@ -313,7 +339,7 @@ describe('OpenRouter Liquid adapter', () => {
     await expectedTimeout;
   });
 
-  it('grounds judgment in supplied copy because the media URL is not visual input', async () => {
+  it('judges headline copy only when no media bytes are attached', async () => {
     const judgment = {
       action: 'signup',
       reason: 'The 750 ml capacity is clear in the headline.',
@@ -343,17 +369,173 @@ describe('OpenRouter Liquid adapter', () => {
     expect(body?.response_format.json_schema.name).toBe('persona_judgment');
     expect(body?.messages[1].content).toContain('A 750 ml bottle for every day');
     expect(body?.messages[1].content).toContain('Take 750 ml along for the day');
-    expect(body?.messages[0].content).toContain('cannot see image pixels or watch video');
-    expect(body?.messages[0].content).toContain('mediaUrl is a reference string rather than media input');
-    expect(body?.messages[0].content).toContain('Do not describe, score, or infer visual quality');
-    expect(body?.messages[0].content).not.toContain('shared media');
+    expect(body?.messages[0].content).toContain('If mediaAttached is false, judge copy only');
+    expect(body?.messages[0].content).toContain('Use image or video only when you inspected attached media');
+    expect(body?.messages[0].content).toContain('Matching the campaign brief or product facts is not a reason to click or sign up');
+    expect(JSON.parse(body?.messages[1].content as string).scrollContext.defaultAction).toBe('skip');
     expect(JSON.parse(body?.messages[1].content as string)).toMatchObject({
-      mediaUrl: '/api/creative-assets/job-1', mediaType: 'image',
+      mediaUrl: '/api/creative-assets/job-1', mediaType: 'image', mediaAttached: false,
     });
     expect(result.judgment).toEqual(judgment);
     expect(result.metadata.elapsedMs).toBeGreaterThanOrEqual(0);
     expect(result.metadata.usage?.promptTokens).toBe(200);
     expect(body?.max_tokens).toBe(LIQUID_DEFAULT_MAX_TOKENS);
+  });
+
+  it('attaches image pixels as a vision data URL when media is supplied', async () => {
+    const judgment = {
+      action: 'click',
+      reason: 'The bottle in the photo matches the everyday claim.',
+      dwellSeconds: 11,
+      timeToActionSeconds: 6,
+      confidence: 0.7,
+      attention: 0.8,
+      clarity: 0.7,
+      trust: 0.6,
+      purchaseIntent: 0.5,
+      noticedFirst: 'image',
+      friction: 'none',
+    };
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    let body: Record<string, any> | undefined;
+    const local = new LiquidClient({ baseUrl: 'http://127.0.0.1:8765/v1', model: 'LiquidAI/LFM2.5-VL-3B-MLX-8bit' }, async (_input, init = {}) => {
+      body = JSON.parse(String(init.body)) as Record<string, any>;
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(judgment) } }] }), { status: 200 });
+    });
+    const result = await local.judgeCreative({
+      brief: 'Campaign: Bottle\nProduct: 750 ml bottle',
+      personaCard: 'You are a 25–34-year-old specialist.',
+      personaLabel: '25–34 specialist',
+      assignedHeadline: 'A 750 ml bottle for every day',
+      siblingHeadlines: ['Take 750 ml along for the day'],
+      mediaUrl: '/api/creative-assets/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      mediaType: 'image',
+      media: { bytes: png, contentType: 'image/png', mediaType: 'image' },
+    });
+    expect(Array.isArray(body?.messages[1].content)).toBe(true);
+    expect(body?.messages[1].content[0]).toEqual({
+      type: 'text',
+      text: expect.stringContaining('"mediaAttached":true'),
+    });
+    expect(body?.messages[1].content[1]).toEqual({
+      type: 'image_url',
+      image_url: { url: `data:image/png;base64,${Buffer.from(png).toString('base64')}` },
+    });
+    expect(JSON.parse(body?.messages[1].content[0].text as string)).not.toHaveProperty('media');
+    expect(result.judgment.noticedFirst).toBe('image');
+  });
+
+  it('attaches video bytes as a vision data URL when media is supplied', async () => {
+    const judgment = {
+      action: 'skip',
+      reason: 'The clip is too busy for a commute.',
+      dwellSeconds: 4,
+      timeToActionSeconds: 2,
+      confidence: 0.5,
+      attention: 0.4,
+      clarity: 0.4,
+      trust: 0.4,
+      purchaseIntent: 0.2,
+      noticedFirst: 'video',
+      friction: 'busy',
+    };
+    const mp4 = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+    let body: Record<string, any> | undefined;
+    const local = new LiquidClient({ baseUrl: 'http://127.0.0.1:8765/v1', model: 'LiquidAI/LFM2.5-VL-3B-MLX-8bit' }, async (_input, init = {}) => {
+      body = JSON.parse(String(init.body)) as Record<string, any>;
+      return new Response(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(judgment) } }] }), { status: 200 });
+    });
+    await local.judgeCreative({
+      brief: 'Campaign: Bottle',
+      personaCard: 'You are a commuter.',
+      personaLabel: '25–34 commuter',
+      assignedHeadline: 'A 750 ml bottle for every day',
+      siblingHeadlines: ['Take 750 ml along for the day'],
+      mediaUrl: '/api/creative-assets/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      mediaType: 'video',
+      media: { bytes: mp4, contentType: 'video/mp4', mediaType: 'video' },
+    });
+    expect(body?.messages[1].content[1]).toEqual({
+      type: 'video_url',
+      video_url: { url: `data:video/mp4;base64,${Buffer.from(mp4).toString('base64')}` },
+    });
+  });
+
+  it('rejects vision media that exceeds the size limit', async () => {
+    const oversized = new Uint8Array(LIQUID_VISION_IMAGE_MAX_BYTES + 1);
+    await expect(client(async () => openRouterResponse({ content: '{}' })).judgeCreative({
+      brief: 'Campaign: Bottle',
+      personaCard: 'You are a student.',
+      personaLabel: '18–24 student',
+      assignedHeadline: 'A 750 ml bottle for every day',
+      siblingHeadlines: ['Take 750 ml along for the day'],
+      mediaType: 'image',
+      media: { bytes: oversized, contentType: 'image/png', mediaType: 'image' },
+    })).rejects.toMatchObject({ code: 'configuration', message: 'Judge media exceeds the vision size limit.' });
+  });
+
+  it('normalizes sloppy local VLM enum values instead of failing the job', async () => {
+    const result = await client(async () => openRouterResponse({
+      content: JSON.stringify({
+        action: 'Sign up',
+        reason: 'The photo makes the bottle look easy to carry.',
+        dwell_seconds: 10,
+        time_to_action_seconds: 6,
+        confidence: 0.7,
+        attention: 0.8,
+        clarity: 0.6,
+        trust: 0.5,
+        purchase_intent: 0.4,
+        noticed_first: 'the product image',
+        friction: 'not relevant',
+      }),
+    })).judgeCreative({
+      brief: 'Campaign: Bottle',
+      personaCard: 'You are a commuter.',
+      personaLabel: '25–34 commuter',
+      assignedHeadline: 'A 750 ml bottle for every day',
+      siblingHeadlines: ['Take 750 ml along for the day'],
+    });
+    expect(result.judgment).toMatchObject({
+      action: 'signup',
+      noticedFirst: 'image',
+      friction: 'relevance',
+      dwellSeconds: 10,
+      timeToActionSeconds: 6,
+      purchaseIntent: 0.4,
+    });
+  });
+
+  it('accepts 0-10 score scales from the local VLM', async () => {
+    const result = await client(async () => openRouterResponse({
+      content: JSON.stringify({
+        action: 'skip',
+        reason: 'Too busy to stop.',
+        dwellSeconds: 2,
+        timeToActionSeconds: 1,
+        confidence: 7,
+        attention: 3,
+        clarity: 8,
+        trust: 4,
+        purchaseIntent: 2,
+        noticedFirst: 'headline',
+        friction: 'busy',
+      }),
+    })).judgeCreative({
+      brief: 'Campaign: Bottle',
+      personaCard: 'You are a commuter.',
+      personaLabel: '25–34 commuter',
+      assignedHeadline: 'A 750 ml bottle for every day',
+      siblingHeadlines: ['Take 750 ml along for the day'],
+    });
+    expect(result.judgment).toMatchObject({
+      action: 'skip',
+      confidence: 0.7,
+      attention: 0.3,
+      clarity: 0.8,
+      trust: 0.4,
+      purchaseIntent: 0.2,
+    });
   });
 
   it('keeps a valid persona judgment when the model hits the token cap after finishing JSON', async () => {

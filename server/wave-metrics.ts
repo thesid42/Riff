@@ -122,6 +122,9 @@ export function segmentMetrics(jobs: AgentJob[], extras: PersonaTemplate[] = [])
   });
 }
 
+/** The most one persona judgment can spend: an impression plus a click. */
+export const MAX_AGENT_COST_CENTS = IMPRESSION_CENTS + CLICK_CENTS;
+
 export function eventCost(action: AgentJob['action']): number {
   if (action === 'signup' || action === 'click') return IMPRESSION_CENTS + CLICK_CENTS;
   return IMPRESSION_CENTS;

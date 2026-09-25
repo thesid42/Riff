@@ -88,7 +88,7 @@ describe('persona experiment setup', () => {
     expect(screen.getByRole('region', { name: 'Next wave brief' })).toBeTruthy();
     expect(screen.getByText(headlines[0])).toBeTruthy();
     expect(screen.getByText(headlines[1])).toBeTruthy();
-    expect(screen.getByText('This simulation evaluates headline copy only. It does not inspect images or videos.')).toBeTruthy();
+    expect(screen.getByText('Agents inspect the selected image or video with its headline, then simulate skipping, clicking, or signing up.')).toBeTruthy();
     expect(screen.getByText('A saved creative is selected for the next wave.')).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Start wave' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Start wave' }).hasAttribute('disabled')).toBe(false);
@@ -142,7 +142,7 @@ describe('persona experiment setup', () => {
       }],
       latestDecision: {
         id: 'decision-old', campaignId: 'campaign-1', experimentId: 'experiment-old', action: 'wait',
-        explanation: 'This review belongs to an older wave.', hypothesis: '', headlines: [], evidenceIds: [], createdAt: stamp,
+        explanation: 'This review belongs to an older wave.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: [], needsNewCreative: false, creativeOutcome: null, createdAt: stamp,
       },
     });
     render(<WaveHarness initialWave={wave} />);
