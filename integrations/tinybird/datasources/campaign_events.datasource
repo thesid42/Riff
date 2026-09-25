@@ -1,0 +1,15 @@
+DESCRIPTION > Simulated Riff campaign traffic and conversion events.
+
+SCHEMA >
+    `campaign_id` UUID,
+    `experiment_id` UUID,
+    `variant_id` UUID,
+    `event_id` UUID,
+    `visitor_id` UUID,
+    `timestamp` DateTime64(3, 'UTC'),
+    `event_type` LowCardinality(String),
+    `cost_cents` UInt32
+
+ENGINE "MergeTree"
+ENGINE_PARTITION_KEY "toYYYYMM(timestamp)"
+ENGINE_SORTING_KEY "campaign_id, experiment_id, timestamp, event_id"

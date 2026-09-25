@@ -1,0 +1,18 @@
+node_modules/
+dist/
+.data/
+.cache/
+.env
+.env.*
+!.env.example
+coverage/
+test-results/
+*.log
+*.tmp.html
+
+# Keep internal notes and design artifacts out of the public repository.
+/*.md
+!/README.md
+/output/
+/.codex/
+/.agents/

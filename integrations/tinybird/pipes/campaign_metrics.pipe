@@ -1,0 +1,26 @@
+DESCRIPTION > Deduplicated experiment event counts for a campaign and half-open UTC time window.
+
+NODE campaign_metrics
+SQL >
+    %
+    WITH deduplicated AS (
+        SELECT campaign_id, experiment_id, variant_id, event_id, visitor_id, timestamp, event_type, cost_cents
+        FROM campaign_events
+        WHERE campaign_id = toUUID({{ String(campaign_id, required=True) }})
+          AND experiment_id = toUUID({{ String(experiment_id, required=True) }})
+          AND timestamp >= parseDateTime64BestEffort({{ String(start, required=True) }}, 3, 'UTC')
+          AND timestamp < parseDateTime64BestEffort({{ String(end, required=True) }}, 3, 'UTC')
+        ORDER BY timestamp DESC
+        LIMIT 1 BY event_id
+    )
+    SELECT
+        toString(variant_id) AS variant_id,
+        countIf(event_type = 'impression') AS impressions,
+        uniqExactIf(visitor_id, event_type = 'impression') AS unique_visitors,
+        countIf(event_type = 'click') AS clicks,
+        countIf(event_type = 'signup') AS signups,
+        sum(cost_cents) AS spend_cents
+    FROM deduplicated
+    GROUP BY variant_id
+
+TYPE ENDPOINT
