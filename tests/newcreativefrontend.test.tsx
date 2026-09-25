@@ -94,6 +94,7 @@ function installCanvasPreviewSupport(deferDecodeAt = -1) {
   const urlsCreated: string[] = [];
   const urlsRevoked: string[] = [];
   let decodeCount = 0;
+  let deferredDecodeStarted = false;
   let resolveDeferredDecode: (() => void) | null = null;
   const context = {
     fillRect: vi.fn(), drawImage: vi.fn(), beginPath: vi.fn(), roundRect: vi.fn(), rect: vi.fn(), fill: vi.fn(), fillText: vi.fn(),
@@ -112,7 +113,7 @@ function installCanvasPreviewSupport(deferDecodeAt = -1) {
     src = '';
     decode() {
       decodeCount += 1;
-      if (decodeCount === deferDecodeAt) return new Promise<void>((resolve) => { resolveDeferredDecode = resolve; });
+      if (decodeCount === deferDecodeAt) return new Promise<void>((resolve) => { deferredDecodeStarted = true; resolveDeferredDecode = resolve; });
       return Promise.resolve();
     }
   });
@@ -133,7 +134,7 @@ function installCanvasPreviewSupport(deferDecodeAt = -1) {
     if (previousToBlob) Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', previousToBlob);
     else Reflect.deleteProperty(HTMLCanvasElement.prototype, 'toBlob');
   };
-  return { urlsCreated, urlsRevoked, resolveDeferredDecode: () => resolveDeferredDecode?.() };
+  return { urlsCreated, urlsRevoked, isDeferredDecodeStarted: () => deferredDecodeStarted, resolveDeferredDecode: () => resolveDeferredDecode?.() };
 }
 
 async function expandSavedDrafts() {
@@ -459,6 +460,133 @@ describe('creative composer', () => {
     expect(document.activeElement).toBe(openButton);
     expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
 
+  });
+
+  it('navigates the clicked job’s ready A/B/C outputs in order and enforces gallery bounds', async () => {
+    const currentJob = job({
+      id: 'three-version-gallery-job', visualMode: 'distinct', imageUrl: null,
+      headlines: ['Current version A', 'Current version B', 'Current version C'],
+      outputs: [
+        output({ id: 'three-a', index: 0, headline: 'Current version A', imageUrl: '/api/creative-assets/three-a' }),
+        output({ id: 'three-b', index: 1, headline: 'Current version B', imageUrl: '/api/creative-assets/three-b' }),
+        output({ id: 'three-c', index: 2, headline: 'Current version C', imageUrl: '/api/creative-assets/three-c' }),
+      ],
+    });
+    const olderJob = job({ id: 'older-three-version-job', createdAt: '2026-09-24T18:00:00.000Z', headlines: ['Older A', 'Older B'] });
+    const calls = installFetch({ jobs: [currentJob, olderJob] });
+    render(<CreativeComposer campaign={{ ...campaign, headlines: currentJob.headlines }} />);
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    fireEvent.click(await within(latest).findByRole('button', { name: 'View image for Version C' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Version C image draft' });
+    expect(screen.getByText('3 of 3')).toBeTruthy();
+    const previous = screen.getByRole('button', { name: 'Previous version' }) as HTMLButtonElement;
+    const next = screen.getByRole('button', { name: 'Next version' }) as HTMLButtonElement;
+    expect(previous.disabled).toBe(false);
+    expect(next.disabled).toBe(true);
+    fireEvent.click(previous);
+    expect(dialog.querySelector('h2')?.textContent).toBe('Version B image draft');
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe('/api/creative-assets/three-b');
+    fireEvent.keyDown(dialog, { key: 'ArrowLeft' });
+    expect(dialog.querySelector('h2')?.textContent).toBe('Version A image draft');
+    expect((screen.getByRole('button', { name: 'Previous version' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(next);
+    expect(dialog.querySelector('h2')?.textContent).toBe('Version B image draft');
+    fireEvent.click(next);
+    expect(dialog.querySelector('h2')?.textContent).toBe('Version C image draft');
+    expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
+  });
+
+  it('navigates only the clicked job’s ready A and C outputs, skipping failed B and enforcing bounds', async () => {
+    const currentJob = job({
+      id: 'current-gallery-job', status: 'failed', visualMode: 'distinct', imageUrl: null,
+      headlines: ['Current version A', 'Current version B', 'Current version C'],
+      outputs: [
+        output({ id: 'current-a', index: 0, headline: 'Current version A', imageUrl: '/api/creative-assets/current-a' }),
+        output({ id: 'current-b', index: 1, headline: 'Current version B', status: 'failed', imageUrl: null, error: 'B did not finish.' }),
+        output({ id: 'current-c', index: 2, headline: 'Current version C', imageUrl: '/api/creative-assets/current-c' }),
+      ],
+    });
+    const olderJob = job({ id: 'older-gallery-job', createdAt: '2026-09-24T18:00:00.000Z', headlines: ['Older A', 'Older B'] });
+    const calls = installFetch({ jobs: [currentJob, olderJob] });
+    render(<CreativeComposer campaign={{ ...campaign, headlines: currentJob.headlines }} />);
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    fireEvent.click(await within(latest).findByRole('button', { name: 'View image for Version C' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Version C image draft' });
+    expect(screen.getByText('2 of 2')).toBeTruthy();
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe('/api/creative-assets/current-c');
+    const previous = screen.getByRole('button', { name: 'Previous version' }) as HTMLButtonElement;
+    const next = screen.getByRole('button', { name: 'Next version' }) as HTMLButtonElement;
+    expect(previous.disabled).toBe(false);
+    expect(next.disabled).toBe(true);
+
+    fireEvent.click(previous);
+    expect(dialog.querySelector('h2')?.textContent).toBe('Version A image draft');
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe('/api/creative-assets/current-a');
+    expect(screen.getByText('1 of 2')).toBeTruthy();
+    fireEvent.click(next);
+    expect(dialog.querySelector('h2')?.textContent).toBe('Version C image draft');
+    expect(dialog.querySelector('img')?.getAttribute('alt')).toContain('Version C');
+    expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
+  });
+
+  it('keeps finished-ad mode across shared-photo headlines and revokes the whole gallery on close', async () => {
+    const canvas = installCanvasPreviewSupport();
+    const shared = job({
+      id: 'shared-finished-job', imageUrl: '/api/creative-assets/shared-photo',
+      headlines: ['Caption for version A', 'A different caption for version B'],
+    });
+    const calls = installFetch({ jobs: [shared] });
+    render(<CreativeComposer campaign={{ ...campaign, headlines: shared.headlines }} />);
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    const firstPreview = latest.querySelector('.finished-ad-preview') as HTMLElement;
+    const inspect = within(firstPreview).getByRole('button', { name: 'Inspect full size' });
+    await waitFor(() => expect((inspect as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(inspect);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Finished ad for Version A' });
+    await screen.findByText('1 of 2');
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe('blob:finished-ad-1');
+    expect(dialog.querySelector('img')?.getAttribute('alt')).toContain('Caption for version A');
+    fireEvent.click(screen.getByRole('button', { name: 'Next version' }));
+    expect(dialog.querySelector('h2')?.textContent).toBe('Finished ad for Version B');
+    expect(dialog.querySelector('img')?.getAttribute('src')).toBe('blob:finished-ad-2');
+    expect(dialog.querySelector('img')?.getAttribute('alt')).toContain('A different caption for version B');
+    expect(canvas.urlsCreated).toEqual(['blob:finished-ad-1', 'blob:finished-ad-2']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close media viewer' }));
+    expect(canvas.urlsRevoked).toContain('blob:finished-ad-1');
+    expect(canvas.urlsRevoked).toContain('blob:finished-ad-2');
+    expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
+  });
+
+  it('ignores a finished gallery decode that completes after the viewer is closed', async () => {
+    const canvas = installCanvasPreviewSupport(3);
+    const shared = job({
+      id: 'stale-finished-job', imageUrl: '/api/creative-assets/stale-photo',
+      headlines: ['Stale test headline A', 'Stale test headline B'],
+    });
+    installFetch({ jobs: [shared] });
+    render(<CreativeComposer campaign={{ ...campaign, headlines: shared.headlines }} />);
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    const firstPreview = latest.querySelector('.finished-ad-preview') as HTMLElement;
+    const inspect = within(firstPreview).getByRole('button', { name: 'Inspect full size' });
+    await waitFor(() => expect((inspect as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(inspect);
+    const dialog = await screen.findByRole('dialog', { name: 'Finished ad for Version A' });
+    await waitFor(() => expect(canvas.isDeferredDecodeStarted()).toBe(true));
+    fireEvent.click(screen.getByRole('button', { name: 'Close media viewer' }));
+    await act(async () => {
+      canvas.resolveDeferredDecode();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(canvas.urlsCreated).toEqual(['blob:finished-ad-1']);
+    expect(canvas.urlsRevoked).toEqual(['blob:finished-ad-1']);
+    expect(dialog.isConnected).toBe(false);
   });
 
   it('pins the accepted generation, exposes ready partial output immediately, and updates it during polling without opening the archive', async () => {
