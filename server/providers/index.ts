@@ -129,6 +129,17 @@ export function readMaxAutoRounds(env: NodeJS.ProcessEnv = process.env): number 
   return readIntegerSetting(env.MAX_AUTO_ROUNDS, DEFAULT_MAX_AUTO_ROUNDS, 1, 20, 'MAX_AUTO_ROUNDS');
 }
 
+/**
+ * Whether chained rounds may generate new images with BFL. On by default, since new creative per
+ * round is what the loop is for; set AUTO_CREATIVE_ENABLED=false to exercise it without image spend.
+ */
+export function readAutoCreativeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const input = value(env.AUTO_CREATIVE_ENABLED)?.toLowerCase();
+  if (input === undefined || input === 'true') return true;
+  if (input === 'false') return false;
+  throw new ProviderError('AUTO_CREATIVE_ENABLED must be true or false.', 'configuration');
+}
+
 function readIntegerSetting(input: string | undefined, fallback: number, min: number, max: number, name: string): number {
   if (input === undefined || input === '') return fallback;
   const clean = input.trim();

@@ -123,7 +123,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .source-message { margin: 9px 0 0 !important; color: #68756a !important; font-size: 12px !important; line-height: 1.5 !important; }
 .loop-status { margin: 12px 0 0 !important; padding: 10px 12px; border-radius: 8px; border: 1px solid #dbe5d9; background: #f4f8f3; color: #4c5a4e !important; font-size: 12px !important; line-height: 1.5 !important; }
 .loop-status.loop-threshold_met { border-color: #bcd6be; background: #eef6ee; color: #2f5537 !important; }
-.loop-status.loop-review_failed { border-color: #e4cfc6; background: #fbf2ee; color: #7a4a38 !important; }
+.loop-status.loop-review_failed,
+.loop-status.loop-rules_failed,
+.loop-status.loop-creative_failed { border-color: #e4cfc6; background: #fbf2ee; color: #7a4a38 !important; }
 
 .round-charts { margin-top: 17px; padding: 20px 21px 18px; }
 .round-chart-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 18px; margin-top: 16px; }
@@ -138,6 +140,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .round-badge.round-inconclusive { border-color: #e2dcc6; background: #f8f5ea; color: #6f6640; }
 .round-chart-meta { color: #6d776e; font-size: 11px; line-height: 1.45; }
 .round-chart-hypothesis { color: #7d877e; font-size: 11px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.round-creative { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+.round-creative-badge { flex: none; padding: 2px 8px; border-radius: 999px; border: 1px solid #dbe5d9; background: #f2f7f1; color: #5d6b5f; font-size: 10px; letter-spacing: .03em; text-transform: uppercase; }
+.round-creative-badge.round-creative-new { border-color: #bcd6be; background: #eef6ee; color: #3c6444; }
+.round-creative-badge.round-creative-reused { border-color: #e2dcc6; background: #f8f5ea; color: #6f6640; }
+.round-thumbs { display: flex; gap: 6px; min-width: 0; overflow: hidden; }
+.round-thumbs img { width: 44px; height: 44px; flex: none; border-radius: 6px; border: 1px solid #e7eee6; object-fit: cover; background: #f2f5f1; }
+.round-personas { margin-top: 8px; color: #6d776e; font-size: 11px; line-height: 1.45; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .creative-section { margin-top: 6px; }
 .creative-heading { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 12px; }

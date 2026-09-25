@@ -6,7 +6,7 @@ import {
 import type {
   Campaign, Experiment, IntegrationStatus, Lesson, MetricsSnapshot, Variant,
 } from '../shared/types.js';
-import type { WaveSnapshot } from '../shared/run.js';
+import type { RoundSummary, WaveSnapshot } from '../shared/run.js';
 import type { CreativeImageJob } from '../shared/creative.js';
 import CreativeComposer from './CreativeComposer.js';
 import PersonaWave from './PersonaWave.js';
@@ -22,10 +22,23 @@ interface CampaignDetails {
   wave?: WaveSnapshot;
 }
 
-interface RoundMetrics {
+interface RoundMetrics extends Partial<RoundSummary> {
   round: number;
   experiment: Experiment;
   metrics: MetricsSnapshot;
+}
+
+const ROUND_CREATIVE_LABELS: Record<RoundSummary['creative'], string> = {
+  initial: 'Starting creative',
+  new: 'New creative',
+  reused: 'Reused creative',
+  'text-only': 'Text only',
+};
+
+function personaSummary(personas: RoundSummary['personas'] | undefined): string {
+  if (!personas?.length) return 'No personas judged yet';
+  const shown = personas.slice(0, 3).map((persona) => persona.label).join(', ');
+  return personas.length > 3 ? `${shown} +${personas.length - 3} more` : shown;
 }
 
 interface SelectedCreative {
@@ -490,6 +503,19 @@ function CampaignDashboard({
                   <span className="round-chart-meta">{`${count(entry.metrics.totals.signups)} sign-ups · ${count(entry.metrics.totals.clicks)} clicks · ${count(entry.metrics.totals.impressions)} views`}</span>
                   <span className="round-chart-hypothesis">{entry.experiment.hypothesis || 'No hypothesis recorded'}</span>
                 </div>
+                {entry.creative && (
+                  <div className="round-creative">
+                    <span className={`round-creative-badge round-creative-${entry.creative}`}>{ROUND_CREATIVE_LABELS[entry.creative]}</span>
+                    {entry.media?.some((item) => item.imageUrl) && (
+                      <div className="round-thumbs">
+                        {entry.media.map((item) => item.imageUrl
+                          ? <img key={item.label} src={item.imageUrl} alt={`Variant ${item.label}: ${item.headline}`} title={`${item.label}: ${item.headline}`} loading="lazy" />
+                          : null)}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {entry.personas && <span className="round-personas" title={entry.personas.map((persona) => persona.label).join(', ')}>{`${entry.personas.length} personas · ${personaSummary(entry.personas)}`}</span>}
                 <SignupChart series={entry.metrics.series} variants={variants} loading={false} />
                 <div className="chart-footnote"><span>{entry.metrics.source !== 'none' ? `Source: ${humanizeStatus(entry.metrics.source)}` : 'No analytics collected'}</span><span>{displayTime(entry.experiment.windowStart) ?? '—'}</span></div>
               </article>
@@ -512,6 +538,7 @@ function CampaignDashboard({
             <p className={`loop-status loop-${details.wave.loopStatus.reason}`} role="status">
               {details.wave.loopStatus.message}
               {details.wave.loopStatus.bestClickRate != null && ` Best click rate ${percent(details.wave.loopStatus.bestClickRate)} against a ${percent(details.wave.loopStatus.threshold)} threshold, measured from ${humanizeStatus(details.wave.loopStatus.metricsSource)}.`}
+              {details.wave.loopStatus.creativeNote && ` ${details.wave.loopStatus.creativeNote}`}
             </p>
           )}
           {metrics?.message && <p className="source-message">{metrics.message}</p>}

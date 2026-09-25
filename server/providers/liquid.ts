@@ -6,6 +6,8 @@ export interface ExperimentContext {
   brief: string;
   evidence: Array<{ id: string; summary: string }>;
   lessons: Array<{ id: string; statement: string }>;
+  /** Personas the next round may target. personaIds in the decision must come from this list. */
+  personas?: Array<{ id: string; label: string }>;
   stage?: 'initial' | 'review' | 'retest';
 }
 export interface ExperimentDecision {
@@ -14,6 +16,10 @@ export interface ExperimentDecision {
   hypothesis: string;
   headlines: string[];
   evidenceIds: string[];
+  /** Personas to target next round; empty means the full roster. Always empty for wait. */
+  personaIds: string[];
+  /** True when the next test concerns the visual or the headline-visual pairing. False for wait. */
+  needsNewCreative: boolean;
 }
 export interface LiquidUsageMetadata {
   promptTokens?: number;
@@ -62,14 +68,33 @@ const DECISION_JSON_SCHEMA = {
   type: 'object',
   properties: {
     action: { type: 'string', enum: ['wait', 'propose_test'], description: 'Use wait when essential brief information is missing or review data is insufficient. A wait decision has hypothesis:"" and headlines:[].' },
-    explanation: { type: 'string', maxLength: 1_000, description: 'Give a concise reason grounded in the supplied brief, evidence, or lessons.' },
+    explanation: { type: 'string', maxLength: 300, description: 'Two or three short sentences grounded in the supplied brief, evidence, or lessons.' },
     hypothesis: { type: 'string', maxLength: 500, description: 'For wait, this must be exactly the empty string. For propose_test, state a testable proposal about headline directions without claiming headline-only effects.' },
-    headlines: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: 120 }, description: 'For wait, this must be an empty array with no placeholder words or old headlines. For propose_test, give 2 or 3 materially different, comparable headline angles.' },
+    headlines: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: 120 }, description: 'For wait, this must be an empty array with no placeholder words or old headlines. For propose_test, give 2 or 3 materially different, comparable headline angles. Each is ad copy only, under 60 characters, with no labels, dashes, or explanations.' },
     evidenceIds: { type: 'array', maxItems: 30, items: { type: 'string', maxLength: 100 } },
+    personaIds: { type: 'array', maxItems: 0, items: { type: 'string' }, description: 'For wait, an empty array. For propose_test, the supplied persona IDs the next round should target, or an empty array for every persona.' },
+    needsNewCreative: { type: 'boolean', description: 'For wait, false. For propose_test, true when the hypothesis concerns the visual or the headline-visual pairing; false when testing wording alone.' },
   },
-  required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds'],
+  required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds', 'personaIds', 'needsNewCreative'],
   additionalProperties: false,
 } as const;
+
+/**
+ * Persona IDs are constrained to an enum of the supplied IDs. As free-form strings, the small
+ * model can run out its whole completion budget without closing the JSON.
+ */
+function decisionJsonSchema(personaIds: string[]) {
+  const personaProperty = DECISION_JSON_SCHEMA.properties.personaIds;
+  return {
+    ...DECISION_JSON_SCHEMA,
+    properties: {
+      ...DECISION_JSON_SCHEMA.properties,
+      personaIds: personaIds.length
+        ? { ...personaProperty, maxItems: Math.min(40, personaIds.length), items: { type: 'string', enum: personaIds } }
+        : personaProperty,
+    },
+  };
+}
 
 const JUDGMENT_JSON_SCHEMA = {
   type: 'object',
@@ -128,7 +153,7 @@ export class LiquidClient {
             model: this.model,
             temperature: 0.1,
             max_tokens: this.maxTokens,
-            response_format: { type: 'json_schema', json_schema: { name: 'experiment_decision', strict: true, schema: DECISION_JSON_SCHEMA } },
+            response_format: { type: 'json_schema', json_schema: { name: 'experiment_decision', strict: true, schema: decisionJsonSchema(normalized.personas?.map(item => item.id) ?? []) } },
             provider: { require_parameters: true, allow_fallbacks: false },
             reasoning: { exclude: true },
             messages,
@@ -160,7 +185,7 @@ export class LiquidClient {
       if (typeof message.content !== 'string' || message.content.length > 16_000) throw new ProviderError('Liquid response content was invalid.', 'response');
       let parsed: unknown;
       try { parsed = JSON.parse(message.content); } catch { throw new ProviderError('Liquid returned malformed decision JSON.', 'response'); }
-      const decision = validateDecision(parsed, new Set(normalized.evidence.map(item => item.id)));
+      const decision = validateDecision(parsed, new Set(normalized.evidence.map(item => item.id)), new Set(normalized.personas?.map(item => item.id) ?? []));
       const usage = readUsageMetadata(payload.usage);
       const requestId = safeMetadataText(payload.id, 200);
       const model = safeMetadataText(payload.model, 160) ?? this.model;
@@ -219,6 +244,7 @@ export class LiquidClient {
       if (hasToolCalls(message.tool_calls) || (message.function_call !== undefined && message.function_call !== null)) {
         throw new ProviderError('Liquid response attempted to call a tool.', 'response');
       }
+      if (choice.finish_reason === 'length' && typeof message.content !== 'string') throw new ProviderError('Liquid response exhausted its completion token budget.', 'response');
       if (typeof message.content !== 'string' || message.content.length > 16_000) throw new ProviderError('Liquid response content was invalid.', 'response');
       let parsed: unknown;
       try { parsed = JSON.parse(message.content); } catch {
@@ -258,7 +284,7 @@ export class LiquidClient {
 
 const judgeSystemPrompt = 'You are a single fictional campaign viewer. Stay in the supplied persona. You receive JSON text only: you cannot see image pixels or watch video, and mediaUrl is a reference string rather than media input. Judge the assigned headline and campaign brief/copy only. Do not describe, score, or infer visual quality or media content. Do not write new headlines. Prefer headline, offer, or unsure for noticedFirst; never claim you saw an image or video from its URL. Return compact JSON only: action (skip, click, or signup), reason (one short sentence), dwellSeconds, timeToActionSeconds, confidence, attention, clarity, trust, purchaseIntent, noticedFirst, and friction. signup means you would join the waitlist. click means you would open the ad but not sign up. skip means you would ignore it. Scores are 0 to 1. Times are seconds from 0 to 60. Do not invent campaign results or claim this is a real customer. No tools.';
 
-const systemPrompt = 'You are a cautious campaign experiment planner. Return only JSON with action (wait or propose_test), explanation, hypothesis, headlines, and evidenceIds. For wait, hypothesis must be the literal empty string and headlines must be the literal empty array; never put placeholder words, rationale, or old headlines in either field. Example wait shape: {"action":"wait","explanation":"<replace with the context-based reason>","hypothesis":"","headlines":[],"evidenceIds":[]}. Replace the explanation with an actual reason from this context; cite only supplied evidence IDs when relevant, otherwise use an empty evidenceIds array. For propose_test, give headline-direction advice only: propose 2 or 3 materially different, comparable headline directions and a testable proposal about those directions. The application may pair each headline with distinct media; when it does, the comparison is between complete headline-and-visual concepts, so do not attribute any outcome to the headline alone. Do not require the image or other creative elements to stay constant. First check that the brief supplies product, approved facts or claims, audience, and goal; if an essential element is missing, choose wait. Never claim a test won or that a proposed hypothesis is a result. Ground each claim only in an explicitly supplied approved fact or claim: do not turn repeated use or other context into unsupported durability, lifespan, savings, or environmental guarantees. Cite only supplied evidence IDs; do not invent IDs or evidence. No tools.';
+const systemPrompt = 'You are a cautious campaign experiment planner. Return only JSON with action (wait or propose_test), explanation, hypothesis, headlines, evidenceIds, personaIds, and needsNewCreative. For wait, hypothesis must be the literal empty string, headlines and personaIds must be literal empty arrays, and needsNewCreative must be false; never put placeholder words, rationale, or old headlines in any of them. Example wait shape: {"action":"wait","explanation":"<replace with the context-based reason>","hypothesis":"","headlines":[],"evidenceIds":[],"personaIds":[],"needsNewCreative":false}. Replace the explanation with an actual reason from this context, in two or three short sentences; cite only supplied evidence IDs when relevant, otherwise use an empty evidenceIds array. For propose_test, give headline-direction advice only: propose 2 or 3 materially different, comparable headline directions and a testable proposal about those directions. Each headline is finished ad copy under 60 characters, never a label or description of an angle. The application may pair each headline with distinct media; when it does, the comparison is between complete headline-and-visual concepts, so do not attribute any outcome to the headline alone. Do not require the image or other creative elements to stay constant. Set needsNewCreative to true when the hypothesis concerns the visual or how each headline pairs with its visual, and false when the test is about wording alone. When personas are supplied, personaIds may name the ones whose evidence makes them worth testing next; use only supplied persona IDs, and use an empty array to test every persona. First check that the brief supplies product, approved facts or claims, audience, and goal; if an essential element is missing, choose wait. Never claim a test won or that a proposed hypothesis is a result. Ground each claim only in an explicitly supplied approved fact or claim: do not turn repeated use or other context into unsupported durability, lifespan, savings, or environmental guarantees. Cite only supplied evidence IDs; do not invent IDs or evidence. No tools.';
 
 function stagePolicy(stage: ExperimentContext['stage']): string {
   if (stage === 'initial') return 'STAGE POLICY — INITIAL: When product, approved facts or claims, audience, and goal are present, propose a first controlled test. Historical performance observations are not required; do not wait solely because none exist.';
@@ -318,13 +344,15 @@ function validateContext(context: ExperimentContext): ExperimentContext {
   const evidence = context.evidence.map(item => ({ id: boundedText(item?.id, 'evidence id', 100), summary: boundedText(item?.summary, 'evidence summary', 500) }));
   const lessons = context.lessons.map(item => ({ id: boundedText(item?.id, 'lesson id', 100), statement: boundedText(item?.statement, 'lesson statement', 500) }));
   if (new Set(evidence.map(item => item.id)).size !== evidence.length) throw new ProviderError('Evidence IDs must be unique.', 'configuration');
-  return { brief, evidence, lessons, ...(context.stage === undefined ? {} : { stage: context.stage }) };
+  if (context.personas !== undefined && (!Array.isArray(context.personas) || context.personas.length > 64)) throw new ProviderError('Liquid context exceeds limits.', 'configuration');
+  const personas = context.personas?.map(item => ({ id: boundedText(item?.id, 'persona id', 100), label: boundedText(item?.label, 'persona label', 120) }));
+  return { brief, evidence, lessons, ...(personas ? { personas } : {}), ...(context.stage === undefined ? {} : { stage: context.stage }) };
 }
 
-function validateDecision(value: unknown, suppliedEvidence: Set<string>): ExperimentDecision {
+function validateDecision(value: unknown, suppliedEvidence: Set<string>, suppliedPersonas: Set<string>): ExperimentDecision {
   const v = object(value, 'Liquid returned an invalid decision.');
   if (v.action !== 'wait' && v.action !== 'propose_test') throw new ProviderError('Liquid decision action is invalid.', 'response');
-  const explanation = boundedText(v.explanation, 'explanation', 1_000);
+  const explanation = boundedText(v.explanation, 'explanation', 300);
   let hypothesis: string;
   let headlines: string[];
   if (v.action === 'wait') {
@@ -339,7 +367,14 @@ function validateDecision(value: unknown, suppliedEvidence: Set<string>): Experi
     if (new Set(headlines.map(x => x.toLocaleLowerCase())).size !== headlines.length) throw new ProviderError('Liquid comparison headlines must be unique.', 'response');
   }
   if (!Array.isArray(v.evidenceIds) || v.evidenceIds.length > 30 || v.evidenceIds.some(id => typeof id !== 'string' || !suppliedEvidence.has(id))) throw new ProviderError('Liquid decision cited evidence that was not supplied.', 'response');
-  return { action: v.action, explanation, hypothesis, headlines, evidenceIds: [...new Set(v.evidenceIds as string[])] };
+  // The JSON-object fallback path has no schema, so absent fields default to "all personas" and
+  // "reuse creative"; present fields are held to the same rules as the strict schema.
+  const personaIds = v.personaIds ?? [];
+  if (!Array.isArray(personaIds) || personaIds.length > 40 || personaIds.some(id => typeof id !== 'string' || !suppliedPersonas.has(id))) throw new ProviderError('Liquid decision named personas that were not supplied.', 'response');
+  const needsNewCreative = v.needsNewCreative ?? false;
+  if (typeof needsNewCreative !== 'boolean') throw new ProviderError('Liquid decision needsNewCreative must be a boolean.', 'response');
+  if (v.action === 'wait' && (personaIds.length !== 0 || needsNewCreative)) throw new ProviderError('Liquid wait decisions must not propose creative.', 'response');
+  return { action: v.action, explanation, hypothesis, headlines, evidenceIds: [...new Set(v.evidenceIds as string[])], personaIds: [...new Set(personaIds as string[])], needsNewCreative };
 }
 
 function validateJudgeContext(context: CreativeJudgeContext): CreativeJudgeContext {

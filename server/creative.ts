@@ -8,7 +8,7 @@ import { CampaignDatabase, type StoredCreativeImageJob, type StoredCreativeVaria
 
 const IMAGE_WIDTH = 1_024;
 const IMAGE_HEIGHT = 1_024;
-const IMAGE_TIMEOUT_MS = 120_000;
+export const IMAGE_TIMEOUT_MS = 120_000;
 const VIDEO_TIMEOUT_MS = 300_000;
 const POLL_INTERVAL_MS = 1_500;
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;

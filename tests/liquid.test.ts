@@ -16,6 +16,8 @@ const decision: ExperimentDecision = {
   hypothesis: 'A direct time-saving headline may improve signups.',
   headlines: ['Organize feedback in less time', 'Keep team feedback organized'],
   evidenceIds: ['exp-1-variant-a'],
+  personaIds: [],
+  needsNewCreative: false,
 };
 
 afterEach(() => vi.useRealTimers());
@@ -67,7 +69,7 @@ describe('OpenRouter Liquid adapter', () => {
           name: 'experiment_decision',
           strict: true,
           schema: {
-            required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds'],
+            required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds', 'personaIds', 'needsNewCreative'],
             additionalProperties: false,
           },
         },
@@ -169,7 +171,7 @@ describe('OpenRouter Liquid adapter', () => {
     expect(result.decision).toEqual(decision);
     expect(JSON.parse(requestBody?.messages[1].content as string)).toMatchObject({ stage });
     expect(requestBody?.messages[0].content).toContain(policy);
-    expect(requestBody?.response_format.json_schema.schema.required).toEqual(['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds']);
+    expect(requestBody?.response_format.json_schema.schema.required).toEqual(['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds', 'personaIds', 'needsNewCreative']);
   });
 
   it('preserves omitted stage compatibility and rejects an invalid stage before making a request', async () => {
@@ -212,7 +214,7 @@ describe('OpenRouter Liquid adapter', () => {
 
   it('accepts a clean wait and rejects any wait that includes hypothesis text or headlines', async () => {
     const cleanWait: ExperimentDecision = {
-      action: 'wait', explanation: 'The brief does not specify a campaign goal.', hypothesis: '', headlines: [], evidenceIds: [],
+      action: 'wait', explanation: 'The brief does not specify a campaign goal.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: [], needsNewCreative: false,
     };
     const validClient = client(async () => openRouterResponse({ content: JSON.stringify(cleanWait) }));
     await expect(validClient.proposeExperiment(context)).resolves.toEqual(cleanWait);
@@ -220,11 +222,35 @@ describe('OpenRouter Liquid adapter', () => {
     for (const malformed of [
       { ...cleanWait, hypothesis: 'Try a brighter promise.' },
       { ...cleanWait, headlines: ['Built to Last'] },
+      { ...cleanWait, needsNewCreative: true },
     ]) {
       const invalidClient = client(async () => openRouterResponse({ content: JSON.stringify(malformed) }));
       await expect(invalidClient.proposeExperiment(context)).rejects.toMatchObject({
         code: 'response', message: 'Liquid wait decisions must not propose creative.',
       });
+    }
+  });
+
+  it('accepts only supplied persona IDs, requires none for wait, and sends the persona whitelist', async () => {
+    const withPersonas = { ...context, personas: [{ id: 'us-chi-manager', label: 'Chicago manager' }], stage: 'review' as const };
+    let requestBody: Record<string, any> | undefined;
+    const targeted = { ...decision, personaIds: ['us-chi-manager'], needsNewCreative: true };
+    const validClient = client(async (_input, init = {}) => {
+      requestBody = JSON.parse(String(init.body)) as Record<string, any>;
+      return openRouterResponse({ content: JSON.stringify(targeted) });
+    });
+    await expect(validClient.proposeExperiment(withPersonas)).resolves.toEqual(targeted);
+    expect(JSON.parse(requestBody?.messages[1].content as string).personas).toEqual(withPersonas.personas);
+
+    const fixtures = [
+      { name: 'unsupplied persona', context: withPersonas, content: { ...decision, personaIds: ['not-supplied'] }, message: 'Liquid decision named personas that were not supplied.' },
+      { name: 'persona without a whitelist', context, content: { ...decision, personaIds: ['us-chi-manager'] }, message: 'Liquid decision named personas that were not supplied.' },
+      { name: 'wait naming personas', context: withPersonas, content: { action: 'wait', explanation: 'Too little data.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: ['us-chi-manager'], needsNewCreative: false }, message: 'Liquid wait decisions must not propose creative.' },
+      { name: 'non-boolean creative flag', context: withPersonas, content: { ...decision, needsNewCreative: 'yes' }, message: 'Liquid decision needsNewCreative must be a boolean.' },
+    ];
+    for (const fixture of fixtures) {
+      const clientUnderTest = client(async () => openRouterResponse({ content: JSON.stringify(fixture.content) }));
+      await expect(clientUnderTest.proposeExperiment(fixture.context), fixture.name).rejects.toMatchObject({ code: 'response', message: fixture.message });
     }
   });
 

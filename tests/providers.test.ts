@@ -178,8 +178,9 @@ describe('Liquid advisor', () => {
       }) } }] });
     });
     const client = new LiquidClient({ baseUrl: 'http://127.0.0.1:8080/v1', model: 'lfm2.5-1.2b-instruct' }, fixture.fetch);
+    // The JSON-object path has no schema, so omitted persona and creative fields take safe defaults.
     await expect(client.proposeExperiment(context)).resolves.toEqual({
-      action: 'wait', explanation: 'There is not enough evidence yet.', hypothesis: '', headlines: [], evidenceIds: ['event-1'],
+      action: 'wait', explanation: 'There is not enough evidence yet.', hypothesis: '', headlines: [], evidenceIds: ['event-1'], personaIds: [], needsNewCreative: false,
     });
     expect(fixture.calls[0].init.redirect).toBe('error');
   });

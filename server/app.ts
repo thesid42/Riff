@@ -9,7 +9,7 @@ import { persistHeadlinesSchema, runWaveSchema } from '../shared/run.js';
 import { createCustomPersona, customPersonaSchema } from '../shared/personas.js';
 import { creativeImageRequestSchema, creativeVideoRequestSchema } from '../shared/creative.js';
 import { CampaignDatabase } from './database.js';
-import { createProviders, getIntegrationStatuses, readMaxAutoRounds, readSuccessClickRate, type Providers } from './providers/index.js';
+import { createProviders, getIntegrationStatuses, readAutoCreativeEnabled, readMaxAutoRounds, readSuccessClickRate, type Providers } from './providers/index.js';
 import { CreativeService, CreativeServiceError } from './creative.js';
 import { ExperimentRunService, RunServiceError } from './experiment-run.js';
 
@@ -29,6 +29,11 @@ export interface CreateAppOptions {
   bflVideoModel?: string;
   successClickRate?: number;
   maxAutoRounds?: number;
+  /** Lets chained rounds generate new images. Defaults to AUTO_CREATIVE_ENABLED. */
+  autoCreative?: boolean;
+  /** Overrides how long and how often the loop waits on generated images; used by tests. */
+  creativeTimeoutMs?: number;
+  creativePollMs?: number;
 }
 
 export function createApp(options: CreateAppOptions = {}): FastifyInstance {
@@ -51,6 +56,10 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     analytics: providers.analytics,
     successClickRate: options.successClickRate ?? readSuccessClickRate(),
     maxAutoRounds: options.maxAutoRounds ?? readMaxAutoRounds(),
+    // Without BFL the service cannot generate, so the loop is told there is no generator at all.
+    creative: providers.bfl && (options.autoCreative ?? readAutoCreativeEnabled()) ? creative : undefined,
+    creativeTimeoutMs: options.creativeTimeoutMs,
+    creativePollMs: options.creativePollMs,
   });
   database.markInterruptedCreativeJobs(new Date().toISOString());
   runner.recover();

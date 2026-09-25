@@ -35,6 +35,8 @@ function mockLiquid() {
         hypothesis: '',
         headlines: [],
         evidenceIds: ['SEG-01'],
+        personaIds: [],
+        needsNewCreative: false,
       },
       metadata: { elapsedMs: 80 },
     })),
@@ -58,6 +60,8 @@ describe('persona wave', () => {
     directory = await mkdtemp(join(tmpdir(), 'riff-run-'));
     app = createApp({
       databasePath: join(directory, 'campaigns.sqlite'),
+      // One wave per test: a wait decision would otherwise chain collection rounds.
+      maxAutoRounds: 1,
       providers: { liquid: mockLiquid() as never, analytics: mockAnalytics(), videoEnabled: false },
     });
   });
@@ -84,6 +88,8 @@ describe('persona wave', () => {
     await app.close();
     app = createApp({
       databasePath: join(directory, 'campaigns.sqlite'),
+      // One wave per test: a wait decision would otherwise chain collection rounds.
+      maxAutoRounds: 1,
       providers: { liquid: liquid as never, analytics, videoEnabled: false },
     });
     const created = await app.inject({
@@ -145,6 +151,8 @@ describe('persona wave', () => {
     await app.close();
     app = createApp({
       databasePath: join(directory, 'campaigns.sqlite'),
+      // One wave per test: a wait decision would otherwise chain collection rounds.
+      maxAutoRounds: 1,
       providers: { liquid: liquid as never, analytics, videoEnabled: false },
     });
     const created = await app.inject({

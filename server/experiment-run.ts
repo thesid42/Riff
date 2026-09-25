@@ -4,17 +4,20 @@ import {
   DEFAULT_OFFER,
   headlineSetSchema,
   type AgentJob,
+  type CreativeOutcome,
   type DecisionRecord,
   type LoopStatus,
   type LoopStopReason,
+  type RoundSummary,
   type RunWaveInput,
   type WaveSnapshot,
 } from '../shared/run.js';
 import type { Campaign, Experiment, Lesson, MetricsSnapshot, Variant } from '../shared/types.js';
 import { emptyMetricsSnapshot } from '../shared/types.js';
 import type { CampaignDatabase } from './database.js';
+import { IMAGE_TIMEOUT_MS, suggestImagePrompt, type CreativeService } from './creative.js';
 import { DEFAULT_MAX_AUTO_ROUNDS, DEFAULT_SUCCESS_CLICK_RATE, ProviderError, type AnalyticsClient, type AnalyticsEvent, type LiquidClient } from './providers/index.js';
-import { deciderSpeed, eventCost, jobProgress, lastJobError, segmentMetrics, signupSeries, totalsFromJobs, variantTotals } from './wave-metrics.js';
+import { MAX_AGENT_COST_CENTS, deciderSpeed, eventCost, jobProgress, lastJobError, segmentMetrics, signupSeries, totalsFromJobs, variantTotals } from './wave-metrics.js';
 
 export class RunServiceError extends Error {
   constructor(readonly statusCode: number, readonly code: string, message: string) {
@@ -31,20 +34,64 @@ export interface ExperimentRunOptions {
   successClickRate?: number;
   /** Upper bound on automatically chained waves. */
   maxAutoRounds?: number;
+  /**
+   * Generates a chained round's images at step 3. Absent when BFL is unconfigured or
+   * AUTO_CREATIVE_ENABLED is false; the loop then reuses the previous round's media and says so.
+   */
+  creative?: LoopCreative;
+  /** Longest wait for a generated creative job. Defaults to the per-image limit times the image count, plus margin. */
+  creativeTimeoutMs?: number;
+  /** How often to re-read a generating creative job. */
+  creativePollMs?: number;
 }
+
+/** The slice of CreativeService the loop needs; test fakes need only this method. */
+export type LoopCreative = Pick<CreativeService, 'createImageJob'>;
+
+type RoundMedia = Array<{ imageUrl: string | null; videoUrl: string | null }>;
+type VisualMode = 'shared' | 'distinct' | 'text-only';
+
+/** What the current loop is running, so a chained round can decide what to carry forward. */
+interface LoopRound {
+  headlines: string[];
+  media: RoundMedia;
+  visualMode: VisualMode;
+  personaIds: string[];
+  hypothesis: string;
+}
+
+/** The step 6 outcome that the next round is built from. */
+interface NextRound {
+  /** test: the full 1 → 2 → 3 → 4 path. collect: 6 → 4 on the same experiment. */
+  kind: 'test' | 'collect';
+  decisionId: string;
+  hypothesis: string;
+  personaIds: string[];
+  needsNewCreative: boolean;
+}
+
+type RoundCreative =
+  | { ok: true; outcome: CreativeOutcome; media: RoundMedia; visualMode: VisualMode; note?: string }
+  | { ok: false; message: string };
 
 const INGEST_BATCH = 50;
 const MAX_RETRIES = 2;
+const CREATIVE_TIMEOUT_MARGIN_MS = 30_000;
+const DEFAULT_CREATIVE_POLL_MS = 1_000;
 
 export class ExperimentRunService {
   private readonly workers = new Map<string, { stop: boolean; inflight: Set<Promise<void>> }>();
   private readonly ingestErrors = new Map<string, string>();
   private readonly reviewErrors = new Map<string, string>();
   private readonly loopStatuses = new Map<string, LoopStatus>();
-  /** Media carried into each chained round so every wave shares the approved creative. */
-  private readonly loopMedia = new Map<string, Array<{ imageUrl: string | null; videoUrl: string | null }>>();
+  /** The headlines, media and personas of each campaign's latest round, carried into the next. */
+  private readonly loopRounds = new Map<string, LoopRound>();
+  /** Why a loop reused creative without a generator, surfaced when that loop stops. */
+  private readonly creativeNotes = new Map<string, string>();
   /** Timers for chained rounds that have not started yet, so shutdown can cancel them. */
   private readonly pendingRounds = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Chained rounds between their timer and start(), including any wait on image generation. */
+  private readonly preparing = new Map<string, { controller: AbortController; task: Promise<void> }>();
 
   constructor(private readonly options: ExperimentRunOptions) {}
 
@@ -93,14 +140,27 @@ export class ExperimentRunService {
   }
 
   /** Metrics for every round of a campaign, newest first, so the UI can chart each version. */
-  async rounds(campaign: Campaign): Promise<Array<{ round: number; experiment: Experiment; metrics: MetricsSnapshot }>> {
+  async rounds(campaign: Campaign): Promise<Array<{ round: number; experiment: Experiment; metrics: MetricsSnapshot } & RoundSummary>> {
     const experiments = this.options.database.listExperiments(campaign.id);
     const ordered = [...experiments].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    const results = await Promise.all(ordered.map(async (experiment, index) => ({
-      round: index + 1,
-      experiment,
-      metrics: await this.metricsForExperiment(campaign, experiment),
-    })));
+    const decisions = this.options.database.listDecisions(campaign.id);
+    const variantsByRound = ordered.map((experiment) => this.options.database.listExperimentVariants(experiment.id));
+    const results = await Promise.all(ordered.map(async (experiment, index) => {
+      const variants = variantsByRound[index]!;
+      const personaIds = [...new Set(this.options.database.listAgentJobs(campaign.id, experiment.id).map((job) => job.personaId))].sort();
+      // The previous round's decision records what step 3 did for this one; older rows predate
+      // that field, so fall back to comparing the media the two rounds actually used.
+      const previous = index > 0 ? ordered[index - 1]! : null;
+      const recorded = previous ? decisions.find((decision) => decision.experimentId === previous.id)?.creativeOutcome : null;
+      return {
+        round: index + 1,
+        experiment,
+        metrics: await this.metricsForExperiment(campaign, experiment),
+        creative: previous ? recorded ?? compareRoundMedia(variantsByRound[index - 1]!, variants) : 'initial' as const,
+        personas: personaIds.map((id) => ({ id, label: personaById(id, campaign.customPersonas)?.label ?? id })),
+        media: variants.map((variant) => ({ label: variant.label, headline: variant.headline, imageUrl: variant.imageUrl, videoUrl: variant.videoUrl })),
+      };
+    }));
     return results.reverse();
   }
 
@@ -187,27 +247,34 @@ export class ExperimentRunService {
   async start(
     campaign: Campaign,
     input: RunWaveInput,
-    media: Array<{ imageUrl: string | null; videoUrl: string | null }>,
-    visualMode: 'shared' | 'distinct' | 'text-only' = 'text-only',
+    media: RoundMedia,
+    visualMode: VisualMode = 'text-only',
+    round: { hypothesis?: string; chained?: boolean } = {},
   ): Promise<WaveSnapshot> {
     if (!this.options.liquid) throw new RunServiceError(503, 'liquid_unavailable', 'Liquid is not configured.');
     if (!this.options.analytics) throw new RunServiceError(503, 'analytics_unavailable', 'Analytics is not configured.');
     if (campaign.runtime === 'running') throw new RunServiceError(409, 'wave_active', 'This draft already has a persona wave running.');
     const headlines = headlineSetSchema.safeParse(input.headlines?.length ? input.headlines : campaign.headlines);
     if (!headlines.success) throw new RunServiceError(400, 'headlines_required', 'Ask Liquid for headlines, or enter 2 or 3 unique headlines, before starting a wave.');
-    // A manual start begins a fresh loop: clear the previous stop reason and carry the media forward.
+    // A manual start begins a fresh loop: clear the previous stop reason. Either way, record what
+    // this round runs so the next chained round can decide what to carry forward.
     this.loopStatuses.delete(campaign.id);
-    this.loopMedia.set(campaign.id, media);
+    if (!round.chained) {
+      this.creativeNotes.delete(campaign.id);
+      this.cancelPreparing(campaign.id);
+    }
+    const hypothesis = round.hypothesis || (visualMode === 'distinct'
+      ? 'Compare complete campaign concepts, including each headline and its paired visual, while holding the offer constant.'
+      : visualMode === 'shared'
+        ? 'Compare headline directions while holding the offer and shared media constant.'
+        : 'Compare headline directions with text-only variants while holding the offer constant.');
+    this.loopRounds.set(campaign.id, { headlines: headlines.data, media, visualMode, personaIds: input.profileMix ?? [], hypothesis });
     const now = new Date().toISOString();
     this.options.database.setHeadlines(campaign.id, headlines.data, now);
     const experiment = this.options.database.createExperiment({
       id: randomUUID(),
       campaignId: campaign.id,
-      hypothesis: visualMode === 'distinct'
-        ? 'Compare complete campaign concepts, including each headline and its paired visual, while holding the offer constant.'
-        : visualMode === 'shared'
-          ? 'Compare headline directions while holding the offer and shared media constant.'
-          : 'Compare headline directions with text-only variants while holding the offer constant.',
+      hypothesis,
       status: 'collecting',
       windowStart: now,
       createdAt: now,
@@ -267,11 +334,13 @@ export class ExperimentRunService {
   }
 
   pause(campaign: Campaign): WaveSnapshot {
-    if (campaign.runtime !== 'running') throw new RunServiceError(409, 'wave_not_running', 'There is no running wave to pause.');
+    const between = this.pendingRounds.has(campaign.id) || this.preparing.has(campaign.id);
+    if (campaign.runtime !== 'running' && !between) throw new RunServiceError(409, 'wave_not_running', 'There is no running wave to pause.');
     const worker = this.workers.get(campaign.id);
     if (worker) worker.stop = true;
     const pending = this.pendingRounds.get(campaign.id);
     if (pending) { clearTimeout(pending); this.pendingRounds.delete(campaign.id); }
+    this.cancelPreparing(campaign.id);
     // A manual pause ends the automatic loop; scheduleNextRound also re-checks runtime.
     this.loopStatuses.set(campaign.id, {
       reason: 'paused',
@@ -282,7 +351,10 @@ export class ExperimentRunService {
       threshold: this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE,
       metricsSource: 'none',
     });
-    this.options.database.setRuntime(campaign.id, 'paused', campaign.agentCount, campaign.concurrency, new Date().toISOString());
+    // Between rounds there is no wave to resume, so the draft stays idle rather than paused.
+    if (campaign.runtime === 'running') {
+      this.options.database.setRuntime(campaign.id, 'paused', campaign.agentCount, campaign.concurrency, new Date().toISOString());
+    }
     return this.snapshot(this.options.database.getCampaign(campaign.id)!);
   }
 
@@ -301,6 +373,9 @@ export class ExperimentRunService {
   async close(): Promise<void> {
     for (const timer of this.pendingRounds.values()) clearTimeout(timer);
     this.pendingRounds.clear();
+    const preparing = [...this.preparing.values()];
+    for (const { controller } of preparing) controller.abort();
+    await Promise.all(preparing.map(({ task }) => task));
     for (const worker of this.workers.values()) worker.stop = true;
     await Promise.all([...this.workers.values()].flatMap((worker) => [...worker.inflight]));
     this.workers.clear();
@@ -437,24 +512,43 @@ export class ExperimentRunService {
     const measured = await this.metricsForExperiment(campaign, { ...experiment, windowEnd: experiment.windowEnd ?? now });
     const bestClickRate = bestVariantClickRate(measured);
     const stop = (reason: LoopStopReason, message: string) => {
+      const creativeNote = this.creativeNotes.get(campaignId);
       this.loopStatuses.set(campaignId, {
         reason, round, maxRounds, message, bestClickRate, threshold, metricsSource: measured.source === 'none' ? 'none' : measured.source,
+        ...(creativeNote ? { creativeNote } : {}),
       });
     };
 
     // The threshold decides whether to chain another round, not whether to review. Step 6 always
     // runs so the decision and lesson are recorded for this round either way.
     const thresholdMet = bestClickRate != null && bestClickRate >= threshold;
-    const segments = segmentMetrics(jobs, campaign.customPersonas);
+    // Each evidence line names its persona ID, and the same IDs form the whitelist Liquid may
+    // target next round. Liquid accepts at most 30 evidence items, so keep the largest segments.
+    const segments = segmentMetrics(jobs, campaign.customPersonas)
+      .sort((a, b) => b.sampleSize - a.sampleSize || a.segment.localeCompare(b.segment))
+      .slice(0, 30);
     const evidence = segments.map((segment, index) => ({
       id: `SEG-${String(index + 1).padStart(2, '0')}`,
-      summary: `${segment.label}: ${segment.signups}/${segment.views} sign-ups, median decide ${segment.medianDecideMs ?? '—'} ms, confidence ${segment.averageConfidence == null ? '—' : segment.averageConfidence.toFixed(2)}, friction ${segment.topFriction ?? 'none'}.`,
+      summary: `${segment.label} (persona ${segment.segment}): ${segment.signups}/${segment.views} sign-ups, median decide ${segment.medianDecideMs ?? '—'} ms, confidence ${segment.averageConfidence == null ? '—' : segment.averageConfidence.toFixed(2)}, friction ${segment.topFriction ?? 'none'}.`,
     }));
+    const brief = [
+      `Campaign: ${campaign.name}`,
+      `Product: ${campaign.product}`,
+      `Audience: ${campaign.audience}`,
+      `Goal: sign-ups`,
+      `Approved claims: ${campaign.approvedClaims.length ? JSON.stringify(campaign.approvedClaims) : 'None supplied.'}`,
+      `Headlines tested: ${campaign.headlines.join(' | ')}`,
+    ].join('\n');
+    if (brief.length > 4_000) {
+      stop('review_failed', 'Campaign details exceed the experiment planner limit, so the loop stopped. Shorten the campaign name, product, audience, or approved claims.');
+      return;
+    }
     try {
       const result = await this.options.liquid.proposeExperimentWithMetadata({
-        brief: [`Campaign: ${campaign.name}`, `Product: ${campaign.product}`, `Audience: ${campaign.audience}`, `Goal: sign-ups`, `Headlines tested: ${campaign.headlines.join(' | ')}`].join('\n'),
+        brief,
         evidence,
         lessons: this.options.database.listLessons(campaignId).slice(0, 10).map((lesson) => ({ id: lesson.id, statement: lesson.statement })),
+        personas: segments.map((segment) => ({ id: segment.segment, label: segment.label })),
         stage: 'review',
       });
       const decision: DecisionRecord = {
@@ -466,6 +560,9 @@ export class ExperimentRunService {
         hypothesis: result.decision.hypothesis,
         headlines: result.decision.headlines,
         evidenceIds: result.decision.evidenceIds,
+        personaIds: result.decision.personaIds,
+        needsNewCreative: result.decision.needsNewCreative,
+        creativeOutcome: null,
         createdAt: new Date().toISOString(),
       };
       this.options.database.createDecision(decision);
@@ -484,8 +581,39 @@ export class ExperimentRunService {
         stop('threshold_met', `A variant reached a ${((bestClickRate ?? 0) * 100).toFixed(1)}% click rate, meeting the ${(threshold * 100).toFixed(1)}% threshold, so the loop stopped.`);
         return;
       }
-      if (result.decision.action !== 'propose_test') {
-        stop('liquid_wait', 'Liquid asked to keep collecting evidence instead of proposing a new test, so the loop stopped.');
+
+      // wait below the threshold: the evidence is too weak to plan from, so keep collecting on
+      // the same experiment (6 → 4). Plan, rules and creative do not change, but the round still
+      // counts toward the cap and must fit the budget.
+      if (result.decision.action === 'wait') {
+        if (round >= maxRounds) {
+          stop('round_cap', `Liquid asked for more evidence, but the loop reached its limit of ${maxRounds} rounds. Start another wave manually to continue.`);
+          return;
+        }
+        const spend = await this.spendSoFar(campaign);
+        const overBudget = budgetViolation(campaign, spend, campaign.agentCount);
+        if (overBudget) {
+          stop('rules_failed', overBudget);
+          return;
+        }
+        const current = this.loopRounds.get(campaignId);
+        this.loopStatuses.delete(campaignId);
+        this.scheduleNextRound(campaignId, round, {
+          kind: 'collect',
+          decisionId: decision.id,
+          hypothesis: `Keep collecting evidence: ${current?.hypothesis ?? experiment.hypothesis}`,
+          personaIds: current?.personaIds ?? [],
+          needsNewCreative: false,
+        });
+        return;
+      }
+
+      // Step 2: check the proposal against the brief's claims, the budget and the test rules
+      // before anything is applied. A failure leaves the tested headlines in place.
+      const spend = await this.spendSoFar(campaign);
+      const violation = checkRules(campaign, result.decision.headlines, spend, campaign.agentCount);
+      if (violation) {
+        stop('rules_failed', violation);
         return;
       }
       this.options.database.setHeadlines(campaignId, result.decision.headlines, decision.createdAt);
@@ -494,12 +622,25 @@ export class ExperimentRunService {
         return;
       }
       this.loopStatuses.delete(campaignId);
-      this.scheduleNextRound(campaignId, round);
+      this.scheduleNextRound(campaignId, round, {
+        kind: 'test',
+        decisionId: decision.id,
+        hypothesis: result.decision.hypothesis,
+        personaIds: result.decision.personaIds,
+        needsNewCreative: result.decision.needsNewCreative,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Campaign review failed.';
       this.reviewErrors.set(campaignId, message);
       stop('review_failed', `The review step failed, so the loop stopped: ${message}`);
     }
+  }
+
+  /** Simulated spend across every round of the campaign, from the same source the dashboard reads. */
+  private async spendSoFar(campaign: Campaign): Promise<number> {
+    const experiments = this.options.database.listExperiments(campaign.id);
+    const snapshots = await Promise.all(experiments.map((experiment) => this.metricsForExperiment(campaign, experiment)));
+    return snapshots.reduce((sum, snapshot) => sum + snapshot.totals.spendCents, 0);
   }
 
   /**
@@ -510,41 +651,208 @@ export class ExperimentRunService {
    * and return silently, leaving the jobs enqueued with nothing to process them. Deferring past
    * the current task lets that `finally` run first.
    */
-  private scheduleNextRound(campaignId: string, round: number): void {
+  private scheduleNextRound(campaignId: string, round: number, next: NextRound): void {
     // A microtask is not late enough: microtasks drain before the awaiting caller reaches the
     // `finally` that removes the worker, so pump() would still see one and refuse. A timer runs
     // on the macrotask queue, after run() has fully unwound.
     const timer = setTimeout(() => {
       this.pendingRounds.delete(campaignId);
-      void (async () => {
-        // Re-read state: the user may have paused, deleted, or restarted in the meantime.
-        const campaign = this.options.database.getCampaign(campaignId);
-        if (!campaign || campaign.runtime !== 'idle') return;
-        if (this.workers.has(campaignId)) return;
-        const media = this.loopMedia.get(campaignId) ?? [];
-        try {
-          await this.start(campaign, {
-            headlines: campaign.headlines,
-            agentCount: campaign.agentCount,
-            concurrency: campaign.concurrency,
-            profileMix: [],
-          }, media);
-        } catch (error) {
-          this.loopStatuses.set(campaignId, {
-            reason: 'review_failed',
-            round,
-            maxRounds: this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS,
-            message: `The next round could not start: ${error instanceof Error ? error.message : 'unknown error'}`,
-            bestClickRate: null,
-            threshold: this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE,
-            metricsSource: 'none',
-          });
-        }
-      })();
+      const controller = new AbortController();
+      const task = this.runNextRound(campaignId, round, next, controller.signal).finally(() => {
+        if (this.preparing.get(campaignId)?.controller === controller) this.preparing.delete(campaignId);
+      });
+      this.preparing.set(campaignId, { controller, task });
     }, 0);
     timer.unref?.();
     this.pendingRounds.set(campaignId, timer);
   }
+
+  private async runNextRound(campaignId: string, round: number, next: NextRound, signal: AbortSignal): Promise<void> {
+    const failed = (reason: LoopStopReason, message: string) => {
+      this.loopStatuses.set(campaignId, {
+        reason,
+        round,
+        maxRounds: this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS,
+        message,
+        bestClickRate: null,
+        threshold: this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE,
+        metricsSource: 'none',
+      });
+    };
+    try {
+      // Re-read state: the user may have paused, deleted, or restarted in the meantime.
+      const campaign = this.options.database.getCampaign(campaignId);
+      if (!campaign || campaign.runtime !== 'idle' || this.workers.has(campaignId)) return;
+      const current = this.loopRounds.get(campaignId) ?? { headlines: [], media: [], visualMode: 'text-only' as const, personaIds: [], hypothesis: '' };
+
+      // Step 3: create or reuse the creative. A collection round keeps everything as it was.
+      const creative: RoundCreative = next.kind === 'collect'
+        ? { ok: true, outcome: hasMedia(current.media) ? 'reused' : 'text-only', media: current.media, visualMode: current.visualMode }
+        : await this.creativeForRound(campaign, current, next.needsNewCreative, signal);
+      if (signal.aborted) return;
+      if (!creative.ok) {
+        // Never fall back to the previous round's images: that would look like new creative.
+        failed('creative_failed', `Step 3 could not produce new creative, so no round was started: ${creative.message}`);
+        return;
+      }
+      if (creative.note) this.creativeNotes.set(campaignId, creative.note);
+
+      const latest = this.options.database.getCampaign(campaignId);
+      if (!latest || latest.runtime !== 'idle' || this.workers.has(campaignId)) return;
+      this.options.database.setDecisionCreativeOutcome(next.decisionId, creative.outcome);
+      await this.start(latest, {
+        headlines: latest.headlines,
+        agentCount: latest.agentCount,
+        concurrency: latest.concurrency,
+        // An empty list means every persona (filterPersonas treats [] as the full roster), never
+        // an empty wave. Named IDs restrict the wave to the personas Liquid chose.
+        profileMix: next.personaIds.length ? next.personaIds : [],
+      }, creative.media, creative.visualMode, { hypothesis: next.hypothesis, chained: true });
+    } catch (error) {
+      failed('review_failed', `The next round could not start: ${error instanceof Error ? error.message : 'unknown error'}`);
+    }
+  }
+
+  /**
+   * Step 3 for a planned round. Liquid decides create or reuse, but reuse is only valid when the
+   * existing images were made for these exact headlines; otherwise generation is mandatory.
+   */
+  private async creativeForRound(campaign: Campaign, current: LoopRound, needsNewCreative: boolean, signal: AbortSignal): Promise<RoundCreative> {
+    const headlines = campaign.headlines;
+    const media = hasMedia(current.media);
+    const headlinesMatch = current.headlines.length === headlines.length && current.headlines.every((headline, index) => headline === headlines[index]);
+    if (!needsNewCreative && (!media || headlinesMatch)) {
+      return media
+        ? { ok: true, outcome: 'reused', media: current.media, visualMode: current.visualMode }
+        : { ok: true, outcome: 'text-only', media: headlines.map(() => ({ imageUrl: null, videoUrl: null })), visualMode: 'text-only' };
+    }
+
+    const creative = this.options.creative;
+    if (!creative) {
+      // Without a generator, keep the previous media rather than stall the loop, but record that
+      // the round reused it so it is never mistaken for fresh creative.
+      if (!media) return { ok: true, outcome: 'text-only', media: headlines.map(() => ({ imageUrl: null, videoUrl: null })), visualMode: 'text-only' };
+      return {
+        ok: true,
+        outcome: 'reused',
+        media: headlines.map((_, index) => current.media[index] ?? { imageUrl: null, videoUrl: null }),
+        visualMode: current.visualMode,
+        note: 'Image generation is off or unconfigured, so chained rounds reused the previous round\'s images instead of creating new ones.',
+      };
+    }
+
+    let jobId: string;
+    try {
+      const job = await creative.createImageJob(campaign, {
+        // A fresh ID per round, so a retry never collides with the previous round's reservation.
+        requestId: randomUUID(),
+        headlines,
+        imagePrompt: suggestImagePrompt(campaign),
+        variantPrompts: loopVariantPrompts(campaign, headlines),
+      }, signal);
+      jobId = job.id;
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : 'The image job could not be created.' };
+    }
+
+    // createImageJob returns once the job is reserved; wait for every image to be ready.
+    const timeoutMs = this.options.creativeTimeoutMs ?? IMAGE_TIMEOUT_MS * headlines.length + CREATIVE_TIMEOUT_MARGIN_MS;
+    const pollMs = this.options.creativePollMs ?? DEFAULT_CREATIVE_POLL_MS;
+    const deadline = Date.now() + timeoutMs;
+    while (!signal.aborted) {
+      const job = this.options.database.getCreativeJob(jobId);
+      if (!job) return { ok: false, message: 'The image job disappeared before it finished.' };
+      if (job.status === 'ready') {
+        const outputs = [...job.outputs].sort((a, b) => a.index - b.index);
+        if (outputs.length !== headlines.length || outputs.some((output, index) => output.headline !== headlines[index] || output.status !== 'ready' || !output.imageUrl)) {
+          return { ok: false, message: 'The image job finished without one ready image per headline.' };
+        }
+        return { ok: true, outcome: 'new', media: outputs.map((output) => ({ imageUrl: output.imageUrl, videoUrl: null })), visualMode: 'distinct' };
+      }
+      if (job.status === 'failed' || job.status === 'uncertain') return { ok: false, message: job.error ?? `The image job ended as ${job.status}.` };
+      if (Date.now() >= deadline) return { ok: false, message: `The images were not ready within ${Math.round(timeoutMs / 1000)} seconds.` };
+      await delay(pollMs, signal);
+    }
+    return { ok: false, message: 'The round was cancelled while its images were generating.' };
+  }
+
+  private cancelPreparing(campaignId: string): void {
+    const preparing = this.preparing.get(campaignId);
+    if (!preparing) return;
+    preparing.controller.abort();
+    this.preparing.delete(campaignId);
+  }
+}
+
+function hasMedia(media: RoundMedia): boolean {
+  return media.some((item) => item.imageUrl || item.videoUrl);
+}
+
+function compareRoundMedia(previous: Variant[], current: Variant[]): CreativeOutcome {
+  const urls = (variants: Variant[]) => variants.map((variant) => variant.videoUrl ?? variant.imageUrl);
+  const now = urls(current);
+  if (now.every((url) => !url)) return 'text-only';
+  const before = new Set(urls(previous));
+  return now.some((url) => url && !before.has(url)) ? 'new' : 'reused';
+}
+
+/** One visual per headline, so each round compares complete headline-and-visual concepts. */
+function loopVariantPrompts(campaign: Campaign, headlines: string[]): string[] {
+  const base = suggestImagePrompt(campaign);
+  return headlines.map((headline, index) =>
+    `${base} Concept ${String.fromCharCode(65 + index)}: compose the scene to suit the headline "${headline}", which will be added later; render no text in the image.`);
+}
+
+/**
+ * Words that assert durability, superiority, guarantees or environmental benefit. A headline may
+ * use one only when an approved claim does.
+ */
+const CLAIM_WORDS = [
+  'guarantee', 'guaranteed', 'proven', 'clinically', 'certified', 'best', '#1', 'lifetime', 'forever',
+  'unbreakable', 'indestructible', 'cheapest', 'fastest', 'eco-friendly', 'sustainable', 'recyclable',
+  'biodegradable', 'carbon', 'plastic-free', 'award-winning', 'save', 'saves', 'savings',
+];
+
+/**
+ * Step 2: returns the first rule a proposal breaks, or null. The claims check is a deterministic
+ * floor, not a reading of intent: numbers and claim words in a headline must appear in the
+ * approved claims.
+ */
+export function checkRules(campaign: Pick<Campaign, 'approvedClaims' | 'budgetCents'>, headlines: string[], spentCents: number, agentCount: number): string | null {
+  const parsed = headlineSetSchema.safeParse(headlines);
+  if (!parsed.success) return 'The proposed test did not have 2 or 3 unique headlines, so it was not applied.';
+  const unapproved = unapprovedClaims(parsed.data, campaign.approvedClaims);
+  if (unapproved) return `The headline "${unapproved.headline}" asserts "${unapproved.term}", which is not in the approved claims, so the proposal was not applied.`;
+  return budgetViolation(campaign, spentCents, agentCount);
+}
+
+/** A round may start only if its worst-case spend still fits inside the campaign budget. */
+function budgetViolation(campaign: Pick<Campaign, 'budgetCents'>, spentCents: number, agentCount: number): string | null {
+  const nextRoundCents = agentCount * MAX_AGENT_COST_CENTS;
+  if (spentCents + nextRoundCents <= campaign.budgetCents) return null;
+  return `The next round could spend up to ${cents(nextRoundCents)}, and ${cents(spentCents)} of the ${cents(campaign.budgetCents)} budget is already spent, so the loop stopped.`;
+}
+
+function unapprovedClaims(headlines: string[], approvedClaims: string[]): { headline: string; term: string } | null {
+  const approved = approvedClaims.join(' ').toLocaleLowerCase();
+  const approvedNumbers = new Set(approved.match(/\d+(?:[.,]\d+)*/g) ?? []);
+  for (const headline of headlines) {
+    const text = headline.toLocaleLowerCase();
+    const number = (text.match(/\d+(?:[.,]\d+)*/g) ?? []).find((value) => !approvedNumbers.has(value));
+    if (number) return { headline, term: number };
+    const word = CLAIM_WORDS.find((term) => containsTerm(text, term) && !containsTerm(approved, term));
+    if (word) return { headline, term: word };
+  }
+  return null;
+}
+
+function containsTerm(text: string, term: string): boolean {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9#-])${escaped}($|[^a-z0-9-])`).test(text);
+}
+
+function cents(value: number): string {
+  return `$${(value / 100).toFixed(2)}`;
 }
 
 /** Highest clicks/impressions across variants, or null when nothing has been measured. */
@@ -592,8 +900,13 @@ function backoffMs(error: unknown, attempt: number): number {
   return Math.min(8_000, base * (2 ** (attempt - 1)));
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => { clearTimeout(timer); signal?.removeEventListener('abort', done); resolve(); };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
 }
 
 function medianSafe(values: number[]): number | null {

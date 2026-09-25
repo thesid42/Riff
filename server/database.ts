@@ -9,6 +9,7 @@ import {
   DEFAULT_OFFER,
   type AgentJob,
   type CampaignRuntime,
+  type CreativeOutcome,
   type DecisionRecord,
 } from '../shared/run.js';
 
@@ -233,6 +234,14 @@ export class CampaignDatabase {
     const creativeColumns = new Set((this.#database.prepare('PRAGMA table_info(creative_image_jobs)').all() as Array<{ name: string }>).map((column) => column.name));
     if (!creativeColumns.has('visual_mode')) {
       this.#database.exec("ALTER TABLE creative_image_jobs ADD COLUMN visual_mode TEXT NOT NULL DEFAULT 'shared' CHECK (visual_mode IN ('shared', 'distinct'))");
+    }
+    const decisionColumns = new Set((this.#database.prepare('PRAGMA table_info(decisions)').all() as Array<{ name: string }>).map((column) => column.name));
+    if (!decisionColumns.has('persona_ids')) {
+      this.#database.exec(`
+        ALTER TABLE decisions ADD COLUMN persona_ids TEXT NOT NULL DEFAULT '[]';
+        ALTER TABLE decisions ADD COLUMN needs_new_creative INTEGER NOT NULL DEFAULT 0;
+        ALTER TABLE decisions ADD COLUMN creative_outcome TEXT CHECK (creative_outcome IS NULL OR creative_outcome IN ('new', 'reused', 'text-only'));
+      `);
     }
     this.#database.exec(`
       CREATE TABLE IF NOT EXISTS creative_job_outputs (
@@ -603,11 +612,16 @@ export class CampaignDatabase {
 
   createDecision(record: DecisionRecord): DecisionRecord {
     this.#database.prepare(`
-      INSERT INTO decisions (id, campaign_id, experiment_id, action, explanation, hypothesis, headlines, evidence_ids, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO decisions (id, campaign_id, experiment_id, action, explanation, hypothesis, headlines, evidence_ids, persona_ids, needs_new_creative, creative_outcome, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(record.id, record.campaignId, record.experimentId, record.action, record.explanation, record.hypothesis,
-      JSON.stringify(record.headlines), JSON.stringify(record.evidenceIds), record.createdAt);
+      JSON.stringify(record.headlines), JSON.stringify(record.evidenceIds), JSON.stringify(record.personaIds),
+      record.needsNewCreative ? 1 : 0, record.creativeOutcome, record.createdAt);
     return record;
+  }
+
+  setDecisionCreativeOutcome(id: string, outcome: CreativeOutcome): void {
+    this.#database.prepare('UPDATE decisions SET creative_outcome = ? WHERE id = ?').run(outcome, id);
   }
 
   listDecisions(campaignId: string): DecisionRecord[] {
@@ -706,6 +720,9 @@ interface DecisionRow {
   hypothesis: string;
   headlines: string;
   evidence_ids: string;
+  persona_ids: string;
+  needs_new_creative: number;
+  creative_outcome: CreativeOutcome | null;
   created_at: string;
 }
 
@@ -853,6 +870,9 @@ function toDecision(row: DecisionRow): DecisionRecord {
     hypothesis: row.hypothesis,
     headlines: JSON.parse(row.headlines) as string[],
     evidenceIds: JSON.parse(row.evidence_ids) as string[],
+    personaIds: JSON.parse(row.persona_ids) as string[],
+    needsNewCreative: row.needs_new_creative === 1,
+    creativeOutcome: row.creative_outcome,
     createdAt: row.created_at,
   };
 }
