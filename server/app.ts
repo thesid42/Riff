@@ -6,17 +6,35 @@ import {
   emptyMetricsSnapshot,
   type IntegrationStatus,
 } from '../shared/types.js';
+import { creativeImageRequestSchema, creativeVideoRequestSchema } from '../shared/creative.js';
 import { CampaignDatabase } from './database.js';
-import { getIntegrationStatuses } from './providers/index.js';
+import { createProviders, getIntegrationStatuses, type Providers } from './providers/index.js';
+import { CreativeService, CreativeServiceError } from './creative.js';
 
 export interface CreateAppOptions {
   databasePath?: string;
+  assetDir?: string;
   integrations?: IntegrationStatus[];
+  providers?: Partial<Pick<Providers, 'liquid' | 'bfl' | 'video' | 'videoEnabled'>>;
+  bflModel?: string;
+  bflVideoModel?: string;
 }
 
 export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   const databasePath = options.databasePath ?? resolve(process.cwd(), '.data', 'riff.sqlite');
   const database = new CampaignDatabase(databasePath);
+  const providers = options.providers ?? createProviders();
+  const creative = new CreativeService({
+    database,
+    assetDirectory: options.assetDir ?? resolve(process.cwd(), '.data', 'creative-assets'),
+    liquid: providers.liquid,
+    bfl: providers.bfl,
+    video: providers.video,
+    videoEnabled: options.providers?.videoEnabled ?? providers.videoEnabled ?? false,
+    videoModel: options.bflVideoModel?.trim() || process.env.BFL_VIDEO_MODEL?.trim() || 'flux-3-video',
+    bflModel: options.bflModel?.trim() || process.env.BFL_MODEL?.trim() || 'flux-2-pro',
+  });
+  database.markInterruptedCreativeJobs(new Date().toISOString());
   const app = Fastify({ logger: false });
 
   app.addHook('onRequest', async (request, reply) => {
@@ -89,6 +107,72 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     return emptyMetricsSnapshot(request.params.id);
   });
 
+  app.get<{ Params: { id: string } }>('/api/campaigns/:id/creative', async (request, reply) => {
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    return creative.getCampaignCreative(campaign);
+  });
+
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/creative/plan', async (request, reply) => {
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    if (!isEmptyObject(request.body)) return reply.code(400).send({ error: { code: 'validation_error', message: 'The plan request must be an empty JSON object.' } });
+    try { return await creative.plan(campaign); }
+    catch (error) { return sendCreativeError(reply, error); }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/creative/images', async (request, reply) => {
+    const parsed = creativeImageRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'Image job details are invalid.',
+          issues: parsed.error.issues.map(({ path, message }) => ({ path, message })),
+        },
+      });
+    }
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    try { return { job: await creative.createImageJob(campaign, parsed.data) }; }
+    catch (error) { return sendCreativeError(reply, error); }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/creative/videos', async (request, reply) => {
+    const parsed = creativeVideoRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: {
+          code: 'validation_error',
+          message: 'Video job details are invalid.',
+          issues: parsed.error.issues.map(({ path, message }) => ({ path, message })),
+        },
+      });
+    }
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    try { return { job: await creative.createVideoJob(campaign, parsed.data) }; }
+    catch (error) { return sendCreativeError(reply, error); }
+  });
+
+  app.get<{ Params: { jobId: string } }>('/api/creative-assets/:jobId', async (request, reply) => {
+    const asset = await creative.getAsset(request.params.jobId);
+    if (!asset) return notFound(reply, 'Creative asset');
+    reply.header('x-content-type-options', 'nosniff').header('cache-control', 'private, max-age=3600');
+    if (asset.mediaType === 'video') {
+      reply.header('accept-ranges', 'bytes');
+      const range = request.headers.range;
+      if (range) {
+        const parsed = parseByteRange(range, asset.bytes.byteLength);
+        if (!parsed) return reply.code(416).header('content-range', `bytes */${asset.bytes.byteLength}`).send();
+        const { start, end } = parsed;
+        return reply.code(206).header('content-range', `bytes ${start}-${end}/${asset.bytes.byteLength}`)
+          .header('content-length', String(end - start + 1)).type(asset.contentType).send(asset.bytes.subarray(start, end + 1));
+      }
+    }
+    return reply.type(asset.contentType).send(asset.bytes);
+  });
+
   app.get('/api/integrations', async () => ({
     integrations: options.integrations ?? getIntegrationStatuses(),
   }));
@@ -116,10 +200,43 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     return reply.code(statusCode).send({ error: safeError });
   });
 
-  app.addHook('onClose', async () => database.close());
+  app.addHook('preClose', async () => { await creative.close(); });
+  app.addHook('onClose', async () => {
+    await creative.close();
+    database.close();
+  });
   return app;
 }
 
 function notFound(reply: FastifyReply, entity: string): FastifyReply {
   return reply.code(404).send({ error: { code: 'not_found', message: `${entity} was not found.` } });
+}
+
+function isEmptyObject(value: unknown): boolean {
+  return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0;
+}
+
+function sendCreativeError(reply: FastifyReply, error: unknown): FastifyReply {
+  if (error instanceof CreativeServiceError) {
+    return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+  }
+  return reply.code(500).send({ error: { code: 'creative_failed', message: 'The creative request could not be completed.' } });
+}
+
+function parseByteRange(value: string, size: number): { start: number; end: number } | undefined {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value.trim());
+  if (!match || (!match[1] && !match[2]) || value.includes(',')) return undefined;
+  let start = match[1] ? Number(match[1]) : undefined;
+  let end = match[2] ? Number(match[2]) : undefined;
+  if (start === undefined) {
+    const suffixLength = end!;
+    if (!Number.isSafeInteger(suffixLength) || suffixLength < 1) return undefined;
+    start = Math.max(0, size - suffixLength);
+    end = size - 1;
+  } else {
+    if (!Number.isSafeInteger(start) || start >= size) return undefined;
+    end = end === undefined ? size - 1 : Math.min(end, size - 1);
+    if (!Number.isSafeInteger(end) || end < start) return undefined;
+  }
+  return { start, end };
 }

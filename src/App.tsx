@@ -6,6 +6,7 @@ import {
 import type {
   Campaign, Experiment, IntegrationStatus, Lesson, MetricsSnapshot, Variant,
 } from '../shared/types.js';
+import CreativeComposer from './CreativeComposer.js';
 
 type View = 'Campaign' | 'Experiments' | 'Lessons' | 'Connections';
 type Drawer = 'metrics' | 'setup' | null;
@@ -385,6 +386,8 @@ function CampaignDashboard({
         </section>
       </div>
 
+      {campaign && <CreativeComposer campaign={campaign} />}
+
       <section className="creative-section" aria-labelledby="creative-title">
         <div className="creative-heading">
           <div><span className="section-kicker">CAMPAIGN CONTENT</span><h2 id="creative-title">Creatives &amp; versions</h2></div>
@@ -395,7 +398,7 @@ function CampaignDashboard({
         ) : (
           <div className="empty-creatives">
             <div className="empty-creative-icon"><Sparkles size={19} /></div>
-            <div><h3>{campaign ? 'No creatives yet' : listLoading ? 'Checking campaign content' : 'No campaign content yet'}</h3><p>{campaign ? 'Your campaign draft is saved. Versions and comparisons will appear when there is real creative data.' : 'Save a campaign draft to keep future versions and comparisons with its brief.'}</p></div>
+            <div><h3>{campaign ? 'No experiment versions yet' : listLoading ? 'Checking campaign content' : 'No campaign content yet'}</h3><p>{campaign ? 'Image drafts appear above. Experiment versions and comparisons will show here when they are saved.' : 'Save a campaign draft to keep future versions and comparisons with its brief.'}</p></div>
             {campaign && <span className="empty-chip">Draft only</span>}
           </div>
         )}
@@ -530,7 +533,7 @@ function IntegrationCard({ integration }: { integration: IntegrationStatus }) {
 }
 
 function integrationSummary(integration: IntegrationStatus): string {
-  if (integration.status === 'configured') return 'Configuration is present. Provider connectivity has not been checked.';
+  if (integration.status === 'configured') return 'Configuration is present. This view does not verify connectivity.';
   if (integration.status === 'invalid') return 'One or more local settings need attention.';
   return 'Some required local settings are not present.';
 }

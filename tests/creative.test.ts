@@ -1,0 +1,272 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FastifyInstance } from 'fastify';
+import type { CreativeImageJob } from '../shared/creative.js';
+import type { BflClient, LiquidClient } from '../server/providers/index.js';
+import { ProviderError } from '../server/providers/index.js';
+import { createApp } from '../server/app.js';
+import { CampaignDatabase } from '../server/database.js';
+
+const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+const campaignInput = {
+  name: 'Everyday Bottle',
+  product: 'Sage green 750ml steel bottle',
+  audience: 'People who bring water to work',
+  approvedClaims: ['750ml capacity', 'Stainless steel'],
+  budgetCents: 10_000,
+};
+const imageRequest = {
+  requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  headlines: ['Carry water with ease', 'A bottle for your workday'],
+  imagePrompt: 'A plain sage green steel bottle on a neutral tabletop, softly lit.',
+};
+const decision = {
+  action: 'propose_test' as const,
+  explanation: 'The saved brief supports a first controlled test.',
+  hypothesis: 'A workday-focused headline may increase signups.',
+  headlines: ['Carry water with ease', 'A bottle for your workday'],
+  evidenceIds: [],
+};
+
+function fakeProviders(options: {
+  submit?: (...args: any[]) => Promise<{ id: string; pollingUrl: string }>;
+  poll?: (...args: any[]) => Promise<{ status: string; downloadImage?: () => Promise<{ bytes: Uint8Array; contentType: 'image/png' }> }>;
+  plan?: (...args: any[]) => Promise<{ decision: typeof decision; metadata: { elapsedMs: number; model: string } }>;
+} = {}) {
+  const bfl = {
+    submit: vi.fn(options.submit ?? (async () => ({ id: 'task-123', pollingUrl: 'https://api.bfl.ai/v1/get_result?id=task-123' }))),
+    poll: vi.fn(options.poll ?? (async () => ({ status: 'Ready', downloadImage: async () => ({ bytes: png, contentType: 'image/png' as const }) }))),
+  };
+  const liquid = {
+    proposeExperimentWithMetadata: vi.fn(options.plan ?? (async () => ({ decision, metadata: { elapsedMs: 5, model: 'test-model' } }))),
+  };
+  return { bfl, liquid, providers: { bfl: bfl as unknown as BflClient, liquid: liquid as unknown as LiquidClient } };
+}
+
+describe('creative composer API', () => {
+  let directory: string;
+  let databasePath: string;
+  let assetDir: string;
+  let app: FastifyInstance;
+  let campaignId: string;
+
+  async function createCampaign(): Promise<string> {
+    const response = await app.inject({ method: 'POST', url: '/api/campaigns', payload: campaignInput });
+    expect(response.statusCode).toBe(201);
+    campaignId = response.json().campaign.id as string;
+    return campaignId;
+  }
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'riff-creative-'));
+    databasePath = join(directory, 'campaigns.sqlite');
+    assetDir = join(directory, 'creative-assets');
+  });
+
+  afterEach(async () => {
+    await app?.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it('GET creative is local-only and planning uses saved campaign context without calling BFL', async () => {
+    const fixture = fakeProviders();
+    app = createApp({ databasePath, assetDir, providers: fixture.providers });
+    const id = await createCampaign();
+
+    const get = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` });
+    expect(get.statusCode).toBe(200);
+    expect(get.json()).toMatchObject({ jobs: [] });
+    expect(get.json().imagePromptSuggestion).toContain(campaignInput.product);
+    expect(get.json().imagePromptSuggestion).toContain(campaignInput.audience);
+    expect(get.json().imagePromptSuggestion).toContain('neutral backdrop');
+    expect(get.json().imagePromptSuggestion).toContain('unbranded');
+    expect(fixture.bfl.submit).not.toHaveBeenCalled();
+    expect(fixture.bfl.poll).not.toHaveBeenCalled();
+
+    const plan = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/plan`, payload: {} });
+    expect(plan.statusCode).toBe(200);
+    expect(plan.json()).toEqual({ decision, metadata: { elapsedMs: 5, model: 'test-model' } });
+    expect(fixture.liquid.proposeExperimentWithMetadata).toHaveBeenCalledWith(expect.objectContaining({
+      stage: 'initial', evidence: [], lessons: [],
+      brief: expect.stringContaining(`Approved claims: ${JSON.stringify(campaignInput.approvedClaims)}`),
+    }), undefined);
+    expect(fixture.bfl.submit).not.toHaveBeenCalled();
+  });
+
+  it('refuses an oversized saved Liquid brief without truncating approved claims or calling a provider', async () => {
+    const fixture = fakeProviders();
+    app = createApp({ databasePath, assetDir, providers: fixture.providers });
+    const oversizedCampaign = { ...campaignInput, approvedClaims: Array.from({ length: 20 }, (_, i) => `${i}`.padEnd(300, 'x')) };
+    const created = await app.inject({ method: 'POST', url: '/api/campaigns', payload: oversizedCampaign });
+    expect(created.statusCode).toBe(201);
+    const plan = await app.inject({ method: 'POST', url: `/api/campaigns/${created.json().campaign.id}/creative/plan`, payload: {} });
+    expect(plan.statusCode).toBe(422);
+    expect(plan.json().error.code).toBe('brief_too_long');
+    expect(fixture.liquid.proposeExperimentWithMetadata).not.toHaveBeenCalled();
+    expect(fixture.bfl.submit).not.toHaveBeenCalled();
+  });
+
+  it('validates explicit image requests before BFL, persists ready assets, and makes retries idempotent', async () => {
+    const fixture = fakeProviders();
+    app = createApp({ databasePath, assetDir, providers: fixture.providers, bflModel: 'flux-2-pro' });
+    const id = await createCampaign();
+
+    const bad = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: { ...imageRequest, headlines: ['Same', 'same'] } });
+    expect(bad.statusCode).toBe(400);
+    const malformed = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: { ...imageRequest, imagePrompt: 'x'.repeat(4_001) } });
+    expect(malformed.statusCode).toBe(400);
+    expect(fixture.bfl.submit).not.toHaveBeenCalled();
+
+    const created = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    expect(created.statusCode).toBe(200);
+    const job = created.json().job as CreativeImageJob;
+    expect(job).toMatchObject({ id: imageRequest.requestId, campaignId: id, status: 'ready', imageUrl: `/api/creative-assets/${imageRequest.requestId}`, providerTaskId: 'task-123' });
+    expect(job).toMatchObject({ mediaType: 'image', videoUrl: null, videoOptions: null });
+    expect(job).not.toHaveProperty('pollingUrl');
+    expect(job).not.toHaveProperty('model');
+    expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
+    expect(fixture.bfl.submit).toHaveBeenCalledWith(imageRequest.imagePrompt, 1_024, 1_024, expect.any(AbortSignal));
+    expect(fixture.bfl.poll).toHaveBeenCalledTimes(1);
+
+    const duplicate = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    expect(duplicate.statusCode).toBe(200);
+    expect(duplicate.json().job).toEqual(job);
+    const conflict = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: { ...imageRequest, imagePrompt: 'A changed prompt.' },
+    });
+    expect(conflict.statusCode).toBe(409);
+    expect(conflict.json().error.code).toBe('idempotency_conflict');
+    expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
+
+    const asset = await app.inject({ method: 'GET', url: job.imageUrl! });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.headers['content-type']).toContain('image/png');
+    expect(asset.headers['x-content-type-options']).toBe('nosniff');
+    expect(new Uint8Array(asset.rawPayload)).toEqual(png);
+    expect((await app.inject({ method: 'GET', url: `/api/creative-assets/${'../'.repeat(5)}secret` })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` })).json().jobs).toHaveLength(1);
+  });
+
+  it('marks unknown submit outcomes uncertain, sanitizes errors, blocks double submits, and never retries a reused key', async () => {
+    const fixture = fakeProviders({ submit: async () => { throw new Error('private provider secret'); } });
+    app = createApp({ databasePath, assetDir, providers: fixture.providers });
+    const id = await createCampaign();
+
+    const response = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().job).toMatchObject({ status: 'uncertain', providerTaskId: null });
+    expect(JSON.stringify(response.json())).not.toContain('private provider secret');
+    expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
+
+    const duplicate = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    expect(duplicate.json().job.status).toBe('uncertain');
+    expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
+    const otherKey = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: { ...imageRequest, requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' },
+    });
+    expect(otherKey.statusCode).toBe(409);
+    expect(otherKey.json().error.code).toBe('campaign_media_job_active');
+    expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('surfaces safe billing/auth rejection messages and returns the stored failure without a hidden retry', async () => {
+    const fixture = fakeProviders({ submit: async () => { throw new ProviderError('BFL request failed with HTTP 402.'); } });
+    app = createApp({ databasePath, assetDir, providers: fixture.providers });
+    const id = await createCampaign();
+    const result = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    expect(result.json().job).toMatchObject({ status: 'failed', error: 'The image provider reported insufficient credits (HTTP 402). No automatic retry was made.' });
+    await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: imageRequest });
+    expect(fixture.bfl.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps video disabled by default and validates configurable video jobs before submit', async () => {
+    const fixture = fakeProviders();
+    app = createApp({ databasePath, assetDir, providers: fixture.providers });
+    const id = await createCampaign();
+    const get = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` });
+    expect(get.json().capabilities).toEqual({ image: true, video: false });
+    const disabled = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/creative/videos`,
+      payload: { requestId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', headlines: imageRequest.headlines, imagePrompt: imageRequest.imagePrompt },
+    });
+    expect(disabled.statusCode).toBe(503);
+    expect(disabled.json().error.code).toBe('video_provider_unavailable');
+  });
+
+  it('submits an explicitly enabled video once, persists options/task first, and serves bounded MP4 ranges', async () => {
+    const fixture = fakeProviders();
+    const videoBytes = new Uint8Array([0, 0, 0, 12, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32]);
+    const video = {
+      submit: vi.fn(async () => ({ id: 'video-task-123', pollingUrl: 'https://api.bfl.ai/v1/get_result?id=video-task-123' })),
+      poll: vi.fn(async () => {
+        const observer = new CampaignDatabase(databasePath);
+        const persisted = observer.getCreativeJob('cccccccc-cccc-4ccc-8ccc-cccccccccccc');
+        observer.close();
+        expect(persisted).toMatchObject({
+          mediaType: 'video', status: 'generating', providerTaskId: 'video-task-123',
+          videoOptions: { durationSeconds: 5, resolution: 'hd', aspectRatio: '1:1', generateAudio: false, draft: true },
+        });
+        return { status: 'Ready', downloadVideo: async () => ({ bytes: videoBytes, contentType: 'video/mp4' as const }) };
+      }),
+    };
+    app = createApp({
+      databasePath, assetDir, providers: { ...fixture.providers, video: video as never, videoEnabled: true }, bflVideoModel: 'flux-3-video',
+    });
+    const id = await createCampaign();
+    const request = {
+      requestId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+      headlines: imageRequest.headlines,
+      imagePrompt: 'A short product clip on a neutral studio set.',
+    };
+    const invalid = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/creative/videos`,
+      payload: { ...request, videoOptions: { durationSeconds: 21, resolution: 'fhd', aspectRatio: '1:1', generateAudio: true, draft: true } },
+    });
+    expect(invalid.statusCode).toBe(400);
+    expect(video.submit).not.toHaveBeenCalled();
+
+    const result = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/videos`, payload: request });
+    expect(result.statusCode).toBe(200);
+    const job = result.json().job as CreativeImageJob;
+    expect(job).toMatchObject({
+      mediaType: 'video', status: 'ready', imageUrl: null,
+      videoUrl: `/api/creative-assets/${request.requestId}`,
+      videoOptions: { durationSeconds: 5, resolution: 'hd', aspectRatio: '1:1', generateAudio: false, draft: true },
+    });
+    expect(video.submit).toHaveBeenCalledTimes(1);
+    expect(video.submit).toHaveBeenCalledWith(request.imagePrompt, job.videoOptions, expect.any(AbortSignal));
+
+    const range = await app.inject({ method: 'GET', url: job.videoUrl!, headers: { range: 'bytes=4-7' } });
+    expect(range.statusCode).toBe(206);
+    expect(range.headers['content-range']).toBe(`bytes 4-7/${videoBytes.byteLength}`);
+    expect(new Uint8Array(range.rawPayload)).toEqual(videoBytes.subarray(4, 8));
+    const duplicate = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/videos`, payload: request });
+    expect(duplicate.json().job).toEqual(job);
+    expect(video.submit).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists the provider task before polling and marks interrupted jobs uncertain after restart', async () => {
+    app = createApp({ databasePath, assetDir, providers: fakeProviders().providers });
+    const id = await createCampaign();
+    await app.close();
+
+    const database = new CampaignDatabase(databasePath);
+    database.reserveCreativeJob({
+      id: imageRequest.requestId, campaignId: id, requestHash: 'a'.repeat(64), headlines: imageRequest.headlines,
+      imagePrompt: imageRequest.imagePrompt, model: 'flux-2-pro', mediaType: 'image', videoOptions: null, width: 1_024, height: 1_024,
+      status: 'generating', imageUrl: null, videoUrl: null, error: null, providerTaskId: 'task-restarted',
+      pollingUrl: 'https://api.bfl.ai/v1/get_result?id=task-restarted', contentType: null,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    });
+    database.close();
+
+    app = createApp({ databasePath, assetDir });
+    const creative = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` });
+    expect(creative.json().jobs[0]).toMatchObject({ status: 'uncertain', providerTaskId: 'task-restarted' });
+    expect(JSON.stringify(creative.json())).not.toContain('pollingUrl');
+    const unavailableAsset = await app.inject({ method: 'GET', url: `/api/creative-assets/${imageRequest.requestId}` });
+    expect(unavailableAsset.statusCode).toBe(404);
+  });
+});
