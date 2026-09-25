@@ -40,6 +40,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     database,
     liquid: providers.liquid,
     analytics: providers.analytics,
+    creative,
   });
   database.markInterruptedCreativeJobs(new Date().toISOString());
   runner.recover();

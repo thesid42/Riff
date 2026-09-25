@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { assignPersonaWave, personaById } from '../shared/personas.js';
+import { calibrateHumanJudgment } from './human-behavior.js';
 import {
   DEFAULT_OFFER,
   headlineSetSchema,
@@ -11,7 +12,16 @@ import {
 import type { Campaign, Experiment, Lesson, MetricsSnapshot, Variant } from '../shared/types.js';
 import { emptyMetricsSnapshot } from '../shared/types.js';
 import type { CampaignDatabase } from './database.js';
-import { ProviderError, type AnalyticsClient, type AnalyticsEvent, type LiquidClient } from './providers/index.js';
+import type { CreativeAsset } from './creative.js';
+import {
+  LIQUID_VISION_IMAGE_MAX_BYTES,
+  LIQUID_VISION_VIDEO_MAX_BYTES,
+  ProviderError,
+  type AnalyticsClient,
+  type AnalyticsEvent,
+  type CreativeJudgeMedia,
+  type LiquidClient,
+} from './providers/index.js';
 import { deciderSpeed, eventCost, jobProgress, lastJobError, segmentMetrics, signupSeries, totalsFromJobs, variantTotals } from './wave-metrics.js';
 
 export class RunServiceError extends Error {
@@ -25,6 +35,7 @@ export interface ExperimentRunOptions {
   database: CampaignDatabase;
   liquid?: Pick<LiquidClient, 'judgeCreative' | 'proposeExperimentWithMetadata'>;
   analytics?: AnalyticsClient;
+  creative?: { getAsset(jobId: string): Promise<CreativeAsset | undefined> };
 }
 
 const INGEST_BATCH = 50;
@@ -294,15 +305,37 @@ export class ExperimentRunService {
       .map((item) => item.headline)
       .filter((headline) => headline !== variant.headline);
     const mediaUrl = variant.videoUrl ?? variant.imageUrl;
-    return this.options.liquid.judgeCreative({
+    const mediaType = variant.videoUrl ? 'video' : variant.imageUrl ? 'image' : null;
+    const result = await this.options.liquid.judgeCreative({
       brief: [`Campaign: ${campaign.name}`, `Product: ${campaign.product}`, `Audience: ${campaign.audience}`, `Goal: sign-ups`, `Offer: ${variant.offer}`].join('\n'),
       personaCard: persona.card,
       personaLabel: persona.label,
       assignedHeadline: variant.headline,
       siblingHeadlines: siblings,
       mediaUrl,
-      mediaType: variant.videoUrl ? 'video' : variant.imageUrl ? 'image' : null,
+      mediaType,
+      media: await this.loadJudgeMedia(mediaUrl, mediaType),
     });
+    return {
+      ...result,
+      judgment: calibrateHumanJudgment({
+        judgment: result.judgment,
+        persona,
+        seed: `${job.id}:${job.personaId}:${job.variantId}`,
+        mediaType,
+      }),
+    };
+  }
+
+  private async loadJudgeMedia(mediaUrl: string | null, mediaType: 'image' | 'video' | null): Promise<CreativeJudgeMedia | undefined> {
+    if (!mediaUrl || !mediaType || !this.options.creative) return undefined;
+    const match = /^\/api\/creative-assets\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/i.exec(mediaUrl);
+    if (!match?.[1]) return undefined;
+    const asset = await this.options.creative.getAsset(match[1]);
+    if (!asset || asset.mediaType !== mediaType) return undefined;
+    const maxBytes = mediaType === 'video' ? LIQUID_VISION_VIDEO_MAX_BYTES : LIQUID_VISION_IMAGE_MAX_BYTES;
+    if (asset.bytes.byteLength === 0 || asset.bytes.byteLength > maxBytes) return undefined;
+    return { bytes: asset.bytes, contentType: asset.contentType, mediaType: asset.mediaType };
   }
 
   private async flushEvents(campaignId: string, pending: AnalyticsEvent[]): Promise<void> {
