@@ -60,6 +60,8 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     creative: providers.bfl && (options.autoCreative ?? readAutoCreativeEnabled()) ? creative : undefined,
     creativeTimeoutMs: options.creativeTimeoutMs,
     creativePollMs: options.creativePollMs,
+    // Persona judges read stored media through the same service, whether or not BFL is configured.
+    assets: creative,
   });
   database.markInterruptedCreativeJobs(new Date().toISOString());
   runner.recover();

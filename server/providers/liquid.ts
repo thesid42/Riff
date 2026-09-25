@@ -1,4 +1,4 @@
-import type { PersonaJudgment } from '../../shared/run.js';
+import type { NoticedFirst, PersonaAction, PersonaFriction, PersonaJudgment } from '../../shared/run.js';
 import { clampRange, clampUnit } from '../../shared/run.js';
 import { ProviderError, boundedText, cancelBody, object, readJson, rejectRedirect, safeBaseUrl, timeoutSignal, type FetchLike } from './common.js';
 
@@ -38,6 +38,11 @@ export interface ExperimentDecisionWithMetadata {
   decision: ExperimentDecision;
   metadata: LiquidResponseMetadata;
 }
+export interface CreativeJudgeMedia {
+  bytes: Uint8Array;
+  contentType: 'image/png' | 'image/jpeg' | 'image/webp' | 'video/mp4';
+  mediaType: 'image' | 'video';
+}
 export interface CreativeJudgeContext {
   brief: string;
   personaCard: string;
@@ -46,6 +51,14 @@ export interface CreativeJudgeContext {
   siblingHeadlines: string[];
   mediaUrl?: string | null;
   mediaType?: 'image' | 'video' | null;
+  media?: CreativeJudgeMedia | null;
+  scrollContext?: {
+    surface: 'social_feed';
+    defaultAction: 'skip';
+    typicalClickRate: string;
+    typicalSignupRate: string;
+    rule: string;
+  };
 }
 export interface CreativeJudgmentWithMetadata {
   judgment: PersonaJudgment;
@@ -63,6 +76,8 @@ export const LIQUID_DEFAULT_MAX_TOKENS = 4_096;
 export const LIQUID_DEFAULT_TIMEOUT_MS = 60_000;
 export const LIQUID_MAX_TOKENS_LIMIT = 8_192;
 export const LIQUID_TIMEOUT_MS_LIMIT = 120_000;
+export const LIQUID_VISION_IMAGE_MAX_BYTES = 8 * 1024 * 1024;
+export const LIQUID_VISION_VIDEO_MAX_BYTES = 16 * 1024 * 1024;
 
 const DECISION_JSON_SCHEMA = {
   type: 'object',
@@ -214,7 +229,7 @@ export class LiquidClient {
       const headers: Record<string, string> = { 'content-type': 'application/json' };
       if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
       const url = new URL('chat/completions', this.base.href.endsWith('/') ? this.base : `${this.base.href}/`);
-      const messages = [{ role: 'system', content: judgeSystemPrompt }, { role: 'user', content: JSON.stringify(normalized) }];
+      const messages = [{ role: 'system', content: judgeSystemPrompt }, { role: 'user', content: judgeUserContent(normalized) }];
       const requestBody = this.openRouter
         ? {
             model: this.model,
@@ -282,7 +297,7 @@ export class LiquidClient {
   }
 }
 
-const judgeSystemPrompt = 'You are a single fictional campaign viewer. Stay in the supplied persona. You receive JSON text only: you cannot see image pixels or watch video, and mediaUrl is a reference string rather than media input. Judge the assigned headline and campaign brief/copy only. Do not describe, score, or infer visual quality or media content. Do not write new headlines. Prefer headline, offer, or unsure for noticedFirst; never claim you saw an image or video from its URL. Return compact JSON only: action (skip, click, or signup), reason (one short sentence), dwellSeconds, timeToActionSeconds, confidence, attention, clarity, trust, purchaseIntent, noticedFirst, and friction. signup means you would join the waitlist. click means you would open the ad but not sign up. skip means you would ignore it. Scores are 0 to 1. Times are seconds from 0 to 60. Do not invent campaign results or claim this is a real customer. No tools.';
+const judgeSystemPrompt = 'You are this persona scrolling a social feed on their usual device. Most ads are skipped. Matching the campaign brief or product facts is not a reason to click or sign up. If an image or video is attached, inspect it with the headline and offer. If mediaAttached is false, judge copy only and do not invent visuals. Rate what this person felt: attention (did it stop the scroll), clarity, trust, purchaseIntent (would they want the product), and confidence. Use the full 0 to 1 range; do not default those scores to 0 and do not set confidence to 1 unless the reaction is obvious. Prefer skip. click means open the ad only. signup means they would join the waitlist now; that is rare. noticedFirst must be exactly one of: headline, image, offer, video, unsure. Use image or video only when you inspected attached media. friction must be exactly one of: price, trust, relevance, busy, none. reason must be one sentence from the persona about the ad, not about whether it matches a brief. Return compact JSON only: action, reason, dwellSeconds, timeToActionSeconds, confidence, attention, clarity, trust, purchaseIntent, noticedFirst, and friction. Times are seconds from 0 to 60. This is a simulation, not a real customer. No tools.';
 
 const systemPrompt = 'You are a cautious campaign experiment planner. Return only JSON with action (wait or propose_test), explanation, hypothesis, headlines, evidenceIds, personaIds, and needsNewCreative. For wait, hypothesis must be the literal empty string, headlines and personaIds must be literal empty arrays, and needsNewCreative must be false; never put placeholder words, rationale, or old headlines in any of them. Example wait shape: {"action":"wait","explanation":"<replace with the context-based reason>","hypothesis":"","headlines":[],"evidenceIds":[],"personaIds":[],"needsNewCreative":false}. Replace the explanation with an actual reason from this context, in two or three short sentences; cite only supplied evidence IDs when relevant, otherwise use an empty evidenceIds array. For propose_test, give headline-direction advice only: propose 2 or 3 materially different, comparable headline directions and a testable proposal about those directions. Each headline is finished ad copy under 60 characters, never a label or description of an angle. The application may pair each headline with distinct media; when it does, the comparison is between complete headline-and-visual concepts, so do not attribute any outcome to the headline alone. Do not require the image or other creative elements to stay constant. Set needsNewCreative to true when the hypothesis concerns the visual or how each headline pairs with its visual, and false when the test is about wording alone. When personas are supplied, personaIds may name the ones whose evidence makes them worth testing next; use only supplied persona IDs, and use an empty array to test every persona. First check that the brief supplies product, approved facts or claims, audience, and goal; if an essential element is missing, choose wait. Never claim a test won or that a proposed hypothesis is a result. Ground each claim only in an explicitly supplied approved fact or claim: do not turn repeated use or other context into unsupported durability, lifespan, savings, or environmental guarantees. Cite only supplied evidence IDs; do not invent IDs or evidence. No tools.';
 
@@ -380,6 +395,7 @@ function validateDecision(value: unknown, suppliedEvidence: Set<string>, supplie
 function validateJudgeContext(context: CreativeJudgeContext): CreativeJudgeContext {
   const siblingHeadlines = Array.isArray(context.siblingHeadlines) ? context.siblingHeadlines.map((headline) => boundedText(headline, 'sibling headline', 120)) : [];
   if (siblingHeadlines.length > 3) throw new ProviderError('Judge context exceeds headline limits.', 'configuration');
+  const mediaType = context.mediaType === 'image' || context.mediaType === 'video' ? context.mediaType : null;
   return {
     brief: boundedText(context?.brief, 'brief', 4_000),
     personaCard: boundedText(context?.personaCard, 'persona card', 500),
@@ -387,32 +403,107 @@ function validateJudgeContext(context: CreativeJudgeContext): CreativeJudgeConte
     assignedHeadline: boundedText(context?.assignedHeadline, 'assigned headline', 120),
     siblingHeadlines,
     mediaUrl: context.mediaUrl ? boundedText(context.mediaUrl, 'media URL', 500) : null,
-    mediaType: context.mediaType === 'image' || context.mediaType === 'video' ? context.mediaType : null,
+    mediaType,
+    media: validateJudgeMedia(context.media, mediaType),
+    scrollContext: {
+      surface: 'social_feed',
+      defaultAction: 'skip',
+      typicalClickRate: 'low',
+      typicalSignupRate: 'rare',
+      rule: 'Matching the product brief is not a reason to click or sign up.',
+    },
   };
+}
+
+function validateJudgeMedia(media: CreativeJudgeContext['media'], mediaType: CreativeJudgeContext['mediaType']): CreativeJudgeMedia | null {
+  if (!media) return null;
+  const contentType = media.contentType;
+  const type = media.mediaType;
+  if ((type !== 'image' && type !== 'video') || (mediaType !== null && type !== mediaType)) {
+    throw new ProviderError('Judge media type is invalid.', 'configuration');
+  }
+  if (type === 'image' && contentType !== 'image/png' && contentType !== 'image/jpeg' && contentType !== 'image/webp') {
+    throw new ProviderError('Judge image content type is invalid.', 'configuration');
+  }
+  if (type === 'video' && contentType !== 'video/mp4') throw new ProviderError('Judge video content type is invalid.', 'configuration');
+  const bytes = media.bytes;
+  if (!bytes || bytes.byteLength === 0) throw new ProviderError('Judge media is empty.', 'configuration');
+  const maxBytes = type === 'video' ? LIQUID_VISION_VIDEO_MAX_BYTES : LIQUID_VISION_IMAGE_MAX_BYTES;
+  if (bytes.byteLength > maxBytes) throw new ProviderError('Judge media exceeds the vision size limit.', 'configuration');
+  return { bytes, contentType, mediaType: type };
+}
+
+function judgeUserContent(context: CreativeJudgeContext): string | Array<Record<string, unknown>> {
+  const { media, ...textContext } = context;
+  const text = JSON.stringify({ ...textContext, mediaAttached: media !== null });
+  if (!media) return text;
+  const dataUrl = `data:${media.contentType};base64,${Buffer.from(media.bytes).toString('base64')}`;
+  const visual = media.mediaType === 'video'
+    ? { type: 'video_url', video_url: { url: dataUrl } }
+    : { type: 'image_url', image_url: { url: dataUrl } };
+  return [{ type: 'text', text }, visual];
 }
 
 function validateJudgment(value: unknown): PersonaJudgment {
   const v = object(value, 'Liquid returned an invalid persona judgment.');
-  if (v.action !== 'skip' && v.action !== 'click' && v.action !== 'signup') throw new ProviderError('Persona action is invalid.', 'response');
-  const noticed = v.noticedFirst;
-  if (noticed !== 'headline' && noticed !== 'image' && noticed !== 'offer' && noticed !== 'video' && noticed !== 'unsure') {
-    throw new ProviderError('Persona noticedFirst is invalid.', 'response');
-  }
-  const friction = v.friction;
-  if (friction !== 'price' && friction !== 'trust' && friction !== 'relevance' && friction !== 'busy' && friction !== 'none') {
-    throw new ProviderError('Persona friction is invalid.', 'response');
-  }
+  const action = normalizeAction(firstScalar(v.action ?? v.decision));
   return {
-    action: v.action,
+    action,
     reason: boundedText(v.reason, 'reason', 300),
-    dwellSeconds: clampRange(Number(v.dwellSeconds), 0, 60),
-    timeToActionSeconds: clampRange(Number(v.timeToActionSeconds), 0, 60),
-    confidence: clampUnit(Number(v.confidence)),
-    attention: clampUnit(Number(v.attention)),
-    clarity: clampUnit(Number(v.clarity)),
-    trust: clampUnit(Number(v.trust)),
-    purchaseIntent: clampUnit(Number(v.purchaseIntent)),
-    noticedFirst: noticed,
-    friction,
+    dwellSeconds: clampRange(Number(v.dwellSeconds ?? v.dwell_seconds), 0, 60),
+    timeToActionSeconds: clampRange(Number(v.timeToActionSeconds ?? v.time_to_action_seconds), 0, 60),
+    confidence: unitScore(v.confidence),
+    attention: unitScore(v.attention),
+    clarity: unitScore(v.clarity),
+    trust: unitScore(v.trust),
+    purchaseIntent: unitScore(v.purchaseIntent ?? v.purchase_intent),
+    noticedFirst: normalizeNoticedFirst(firstScalar(v.noticedFirst ?? v.noticed_first)),
+    friction: normalizeFriction(firstScalar(v.friction)),
   };
+}
+
+function unitScore(value: unknown): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return clampUnit(numeric > 1 && numeric <= 10 ? numeric / 10 : numeric);
+}
+
+function firstScalar(value: unknown): unknown {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function normalizeToken(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase().replace(/[_-]+/g, ' ').replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ');
+}
+
+function normalizeAction(value: unknown): PersonaAction {
+  const token = normalizeToken(value);
+  if (token === 'signup' || token === 'sign up' || token === 'join' || token === 'waitlist') return 'signup';
+  if (token === 'click' || token === 'open' || token === 'tap') return 'click';
+  if (token === 'skip' || token === 'ignore' || token === 'pass') return 'skip';
+  throw new ProviderError('Persona action is invalid.', 'response');
+}
+
+function normalizeNoticedFirst(value: unknown): NoticedFirst {
+  const token = normalizeToken(value);
+  if (token === 'headline' || token === 'the headline' || token === 'headlines' || token === 'text' || token === 'copy' || token === 'title') return 'headline';
+  if (token === 'image' || token === 'the image' || token === 'photo' || token === 'the photo' || token === 'picture' || token === 'visual' || token === 'graphic' || token === 'product') return 'image';
+  if (token === 'offer' || token === 'the offer' || token === 'waitlist' || token === 'cta') return 'offer';
+  if (token === 'video' || token === 'the video' || token === 'clip' || token === 'the clip') return 'video';
+  if (token === 'unsure' || token === 'not sure' || token === 'unknown' || token === 'none' || token === '') return 'unsure';
+  if (token.includes('video') || token.includes('clip')) return 'video';
+  if (token.includes('image') || token.includes('photo') || token.includes('picture') || token.includes('visual')) return 'image';
+  if (token.includes('headline') || token.includes('title') || token.includes('copy')) return 'headline';
+  if (token.includes('offer') || token.includes('waitlist')) return 'offer';
+  return 'unsure';
+}
+
+function normalizeFriction(value: unknown): PersonaFriction {
+  const token = normalizeToken(value);
+  if (token === 'price' || token === 'cost' || token === 'expensive') return 'price';
+  if (token === 'trust' || token === 'credibility' || token === 'skeptical') return 'trust';
+  if (token === 'relevance' || token === 'relevant' || token === 'not relevant' || token === 'off topic') return 'relevance';
+  if (token === 'busy' || token === 'no time' || token === 'rushed') return 'busy';
+  return 'none';
 }

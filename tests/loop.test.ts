@@ -10,6 +10,12 @@ import type { AnalyticsClient } from '../server/providers/analytics.js';
 import type { BflClient } from '../server/providers/index.js';
 import type { CreativeJudgmentWithMetadata, ExperimentContext, ExperimentDecisionWithMetadata } from '../server/providers/liquid.js';
 
+// These tests drive the loop through the judge's verdict, so skip the seeded human-behavior mix
+// (covered in human-behavior.test.ts) that would otherwise make click rates vary per run.
+vi.mock('../server/human-behavior.js', () => ({
+  calibrateHumanJudgment: ({ judgment }: { judgment: unknown }) => judgment,
+}));
+
 const headlines = ['A 750 ml bottle for every day', 'Take 750 ml along for the day'];
 const nextHeadlines = ['Carry 750 ml without the bulk', 'A bottle sized for your commute'];
 const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);

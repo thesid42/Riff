@@ -137,7 +137,9 @@ describe('persona wave', () => {
     expect(details.json().wave.deciderSpeed.fastSampleSize + details.json().wave.deciderSpeed.slowSampleSize).toBe(8);
     const ingested = (analytics.ingest as ReturnType<typeof vi.fn>).mock.calls.flatMap((call) => call[0] as Array<{ event_type: string; audience_segment?: string; decision_latency_ms?: number }>);
     expect(ingested.some((event) => event.event_type === 'impression')).toBe(true);
-    expect(ingested.some((event) => event.event_type === 'click')).toBe(true);
+    expect(ingested.filter((event) => event.event_type === 'impression').length).toBe(8);
+    expect(ingested.filter((event) => event.event_type === 'signup').length)
+      .toBeLessThanOrEqual(ingested.filter((event) => event.event_type === 'click').length);
     expect(ingested.every((event) => event.audience_segment && event.decision_latency_ms === 120)).toBe(true);
     expect(liquid.proposeExperimentWithMetadata).toHaveBeenCalledWith(expect.objectContaining({ stage: 'review' }));
   });
@@ -262,6 +264,9 @@ describe('persona wave', () => {
       const wave = await app.inject({ method: 'GET', url: `/api/campaigns/${campaignId}/wave` });
       expect(wave.json().wave.runtime).toBe('idle');
     }, { timeout: 5_000 });
+    const visionCalls = liquid.judgeCreative.mock.calls.map((call) => call[0]);
+    expect(visionCalls.some((input) => input.media?.mediaType === 'image' && input.media.contentType === 'image/png' && input.media.bytes.byteLength > 0)).toBe(true);
+    expect(visionCalls.every((input) => input.mediaType === 'image')).toBe(true);
 
     const textOnly = await app.inject({
       method: 'POST', url: `/api/campaigns/${campaignId}/run`,
@@ -273,6 +278,13 @@ describe('persona wave', () => {
     expect(secondDetails.json().variants.filter((variant: { experimentId: string }) => variant.experimentId === secondExperimentId)
       .map((variant: { imageUrl: string | null; videoUrl: string | null }) => [variant.imageUrl, variant.videoUrl]))
       .toEqual([[null, null], [null, null]]);
+    await vi.waitFor(async () => {
+      const wave = await app.inject({ method: 'GET', url: `/api/campaigns/${campaignId}/wave` });
+      expect(wave.json().wave.runtime).toBe('idle');
+    }, { timeout: 5_000 });
+    const textOnlyCalls = liquid.judgeCreative.mock.calls.slice(visionCalls.length).map((call) => call[0]);
+    expect(textOnlyCalls.length).toBeGreaterThan(0);
+    expect(textOnlyCalls.every((input) => input.media == null && !input.mediaType)).toBe(true);
     expect(bfl.submit).toHaveBeenCalledTimes(2);
   });
 

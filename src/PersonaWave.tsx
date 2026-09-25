@@ -221,8 +221,8 @@ export default function PersonaWave({
       <p className="wave-headlines">{validHeadlines ? `Judging: ${headlines.join(' · ')}` : 'Add 2–3 unique, non-empty headlines in Campaign before starting.'}</p>
       <div className="wave-visual-note" role="status">
         {creativeJobId
-          ? <>Saved creative attached. This simulation evaluates headline copy only; it does not inspect the image or video. <button type="button" className="text-button" onClick={onClearCreative}>Remove creative</button></>
-          : 'This simulation evaluates headline copy only; it does not inspect images or videos. Select a ready creative in Campaign to attach one.'}
+          ? <>Saved creative attached. Agents inspect the media, then a feed-scroll model decides skip, click, or sign-up. Most people skip. <button type="button" className="text-button" onClick={onClearCreative}>Remove creative</button></>
+          : 'No saved creative selected. Agents judge headline copy only, then a feed-scroll model decides skip, click, or sign-up. Most people skip. Select a ready creative in Campaign to attach one.'}
       </div>
 
       <div className="persona-filters">

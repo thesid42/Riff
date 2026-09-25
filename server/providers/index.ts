@@ -25,8 +25,10 @@ export {
   LIQUID_DEFAULT_TIMEOUT_MS,
   LIQUID_MAX_TOKENS_LIMIT,
   LIQUID_TIMEOUT_MS_LIMIT,
+  LIQUID_VISION_IMAGE_MAX_BYTES,
+  LIQUID_VISION_VIDEO_MAX_BYTES,
 } from './liquid.js';
-export type { CreativeJudgeContext, CreativeJudgmentWithMetadata, ExperimentContext, ExperimentDecision, ExperimentDecisionWithMetadata, LiquidClientConfig, LiquidResponseMetadata, LiquidUsageMetadata } from './liquid.js';
+export type { CreativeJudgeContext, CreativeJudgeMedia, CreativeJudgmentWithMetadata, ExperimentContext, ExperimentDecision, ExperimentDecisionWithMetadata, LiquidClientConfig, LiquidResponseMetadata, LiquidUsageMetadata } from './liquid.js';
 export { ProviderError } from './common.js';
 
 export interface Providers { liquid?: LiquidClient; analytics?: AnalyticsClient; bfl?: BflClient; video?: BflVideoClient; videoEnabled: boolean; }

@@ -580,7 +580,7 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
           {!headlinesValid && <p className="composer-guidance">Generation needs 2–3 unique, non-empty headlines. {state.headlines.length >= 2 ? 'Open Versions to fix them.' : 'Suggest them with Liquid or enter them manually.'}</p>}
           {headlinesValid && !validVariantPrompts(promptsForState, state.headlines.length) && <p className="composer-guidance">One or more directions need attention. Open Versions to fix them before generating.</p>}
           {headlinesValid && !promptValid && <p className="composer-guidance">The saved campaign visual context is missing. Reload creative settings before generating.</p>}
-          {headlinesValid && <p className="composer-guidance">Review each headline before generation. Persona experiments judge the copy only, not the pixels or video.</p>}
+          {headlinesValid && <p className="composer-guidance">Review each headline before generation. When a ready creative is selected, persona experiments inspect the image or video together with the copy.</p>}
         </div>
 
         <aside className="composer-side-note">
