@@ -232,6 +232,18 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .image-ad-card h4 { min-height: 32px; margin: 8px 0 6px; color: #354238; font: 600 10px/1.45 'Manrope', sans-serif; }
 .mock-cta { display: grid; min-height: 28px; place-items: center; border-radius: 7px; color: white; background: #587b5e; font-size: 8px; font-weight: 700; }
 .image-ad-card > p { margin: 6px 0 0; color: #9ba49c; font-size: 7px; text-align: center; }
+.media-open-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 29px; margin-top: 8px; padding: 0 9px; border: 1px solid #e0e8de; border-radius: 8px; color: #527657; background: #f7faf6; font-size: 8px; font-weight: 700; cursor: pointer; }
+.media-open-button:hover { border-color: #c6d8c5; background: #eff5ed; }
+.media-viewer-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 24px; background: rgba(20, 29, 23, .82); backdrop-filter: blur(4px); }
+.media-viewer { width: min(1100px, 100%); max-height: min(94vh, 1000px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid rgba(255,255,255,.28); border-radius: 15px; background: #fff; box-shadow: 0 24px 70px rgba(0,0,0,.28); }
+.media-viewer-heading { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 15px; padding: 13px 17px; border-bottom: 1px solid #e9eee7; }
+.media-viewer-heading h2 { margin: 4px 0 0; color: #29362d; font: 700 15px 'Manrope', sans-serif; }
+.media-viewer-content { min-height: 160px; flex: 1 1 auto; display: grid; place-items: center; overflow: auto; padding: 12px; background: #f2f4f1; }
+.media-viewer-image { display: block; max-width: 100%; max-height: calc(94vh - 140px); width: auto; height: auto; object-fit: contain; }
+.media-viewer-video { display: block; max-width: 100%; max-height: calc(94vh - 140px); width: auto; height: auto; background: #121512; }
+.media-viewer-footer { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 16px; border-top: 1px solid #e9eee7; color: #879187; font-size: 9px; }
+.media-viewer-footer a { display: inline-flex; align-items: center; gap: 6px; color: #4c7555; font-size: 9px; font-weight: 700; text-decoration: none; white-space: nowrap; }
+.media-viewer-footer a:hover { text-decoration: underline; }
 .job-message { padding: 10px 11px; border-radius: 8px; color: #7b867c; background: #f7f9f6; font-size: 9px; line-height: 1.5; }
 .job-direction { margin-top: 9px; padding-top: 8px; border-top: 1px solid #eff1ee; }
 .job-direction summary { color: #768377; font-size: 8px; font-weight: 700; cursor: pointer; }
@@ -452,6 +464,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
   .composer-side-note { min-height: 0; }
   .image-ad-grid { grid-template-columns: 1fr; }
   .image-ad-card img { height: 205px; }
+  .media-viewer-backdrop { padding: 10px; }
+  .media-viewer { max-height: 96vh; border-radius: 12px; }
+  .media-viewer-heading { padding: 11px 12px; }
+  .media-viewer-content { padding: 8px; }
+  .media-viewer-image, .media-viewer-video { max-width: 100%; max-height: calc(96vh - 125px); }
+  .media-viewer-footer { align-items: flex-start; padding: 10px 12px; font-size: 8px; }
   .empty-creatives { align-items: flex-start; padding: 15px; }
   .empty-chip { align-self: flex-start; }
   .welcome-card { min-height: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 12px; padding: 25px 20px 17px; }

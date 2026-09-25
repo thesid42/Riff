@@ -2,7 +2,7 @@ import { ProviderError, boundedText, cancelBody, object, readBytesBounded, readJ
 
 const API_HOST = /^api(?:\.[a-z0-9-]+)?\.bfl\.ai$/i;
 const VIDEO_DELIVERY_HOST = /^delivery\.[a-z0-9-]+\.bfl\.ai$/i;
-const ALLOWED_STATUSES = new Set(['Pending', 'Reasoning', 'Generating', 'Ready', 'Error', 'Request Moderated', 'Content Moderated', 'Task not found']);
+const ALLOWED_STATUSES = new Set(['Pending', 'Reasoning', 'Generating', 'Ready', 'Error', 'Failed', 'Request Moderated', 'Content Moderated', 'Task not found']);
 const MAX_MP4_BYTES = 100 * 1024 * 1024;
 
 export type BflVideoOptions = {

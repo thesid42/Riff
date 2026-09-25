@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowDownToLine, ImagePlus, LoaderCircle, Plus, RefreshCw, Sparkles, X } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, Eye, ImagePlus, LoaderCircle, Play, Plus, RefreshCw, Sparkles, X } from 'lucide-react';
 import type { Campaign } from '../shared/types.js';
 import type { CreativeImageJob, CreativeVideoOptions } from '../shared/creative.js';
+import CreativeMediaViewer from './CreativeMediaViewer.js';
 
 type CreativeMediaType = 'image' | 'video';
 interface CreativeCapabilities { image: boolean; video: boolean }
@@ -128,6 +129,7 @@ function draftFingerprint(headlines: string[], imagePrompt: string, mediaType: C
 }
 
 interface StoredRequest { fingerprint: string; requestId: string }
+interface ViewerItem { kind: 'image' | 'video'; src: string; title: string; alt: string }
 
 function requestStorageKey(campaignId: string): string {
   return `riff:creative-request:${campaignId}`;
@@ -169,11 +171,14 @@ function variantLabel(index: number): string { return String.fromCharCode(65 + i
 
 export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
   const [campaignStates, setCampaignStates] = useState<Record<string, ComposerState>>({});
+  const [viewer, setViewer] = useState<ViewerItem | null>(null);
   const planControllers = useRef(new Map<string, AbortController>());
   const state = campaignStates[campaign.id] ?? EMPTY_STATE;
   const updateCampaign = (campaignId: string, update: (current: ComposerState) => ComposerState) => {
     setCampaignStates((previous) => ({ ...previous, [campaignId]: update(previous[campaignId] ?? EMPTY_STATE) }));
   };
+
+  useEffect(() => { setViewer(null); }, [campaign.id]);
 
   useEffect(() => {
     const campaignId = campaign.id;
@@ -278,7 +283,7 @@ export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
       const path = mediaType === 'video' ? 'videos' : 'images';
       const body = mediaType === 'video' ? { requestId, headlines, imagePrompt, videoOptions: state.videoOptions } : { requestId, headlines, imagePrompt };
       const result = await postJson<{ job: CreativeImageJob }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative/${path}`, body);
-      if (!isCreativeJob(result?.job, campaignId)) throw new Error('The image request returned an invalid job. Refresh saved drafts before trying again.');
+      if (!isCreativeJob(result?.job, campaignId)) throw new Error('The creative request returned an invalid job. Refresh saved drafts before trying again.');
       updateCampaign(campaignId, (current) => ({
         ...current,
         generationLoading: false,
@@ -287,7 +292,7 @@ export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
       }));
       if (result.job.status === 'ready') clearStoredRequest(campaignId, requestFingerprint, requestId);
     } catch (error) {
-      updateCampaign(campaignId, (current) => ({ ...current, generationLoading: false, generationError: error instanceof Error ? error.message : 'The image request did not return a result. Reuse the same request to check its status.' }));
+      updateCampaign(campaignId, (current) => ({ ...current, generationLoading: false, generationError: error instanceof Error ? error.message : 'The creative request did not return a result. Reuse the same request to check its status.' }));
     }
   }
 
@@ -302,7 +307,7 @@ export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
   const addHeadline = () => updateCampaign(campaign.id, (current) => current.headlines.length >= 3 ? current : { ...current, headlines: [...current.headlines, ''] });
   const removeHeadline = (index: number) => updateCampaign(campaign.id, (current) => current.headlines.length <= 2 ? current : { ...current, headlines: current.headlines.filter((_, currentIndex) => currentIndex !== index) });
   const mediaWord = state.mediaType === 'video' ? 'video' : 'image';
-  const activeRequestMessage = state.generationLoading ? `Generating a campaign ${mediaWord} draft. This can take up to two minutes; reload saved jobs later to check its status.` :
+  const activeRequestMessage = state.generationLoading ? `Generating a campaign ${mediaWord} draft. This can take up to ${state.mediaType === 'video' ? 'five' : 'two'} minutes; reload saved jobs later to check its status.` :
     activeJob ? 'A creative request is still in progress for this campaign. Refresh saved jobs to check its status.' :
     uncertainOtherJob ? 'Another creative request has an uncertain result. Check saved jobs before starting a new visual draft.' :
     matchingJob?.status === 'uncertain' ? 'This request has an uncertain outcome. A manual retry will reuse the same request ID.' :
@@ -379,34 +384,45 @@ export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
             </button>
             <span>Uses BFL credits · one {state.mediaType} shared across all headline versions</span>
           </div>
-          {!decisionReady && state.decision?.action === 'wait' && <p className="composer-guidance">Headline advice says to wait. No image request can be made until Liquid suggests a test.</p>}
-          {decisionReady && (!headlinesValid || !promptValid) && <p className="composer-guidance">Use 2–3 unique headlines and a non-empty image direction to continue.</p>}
+          {!decisionReady && state.decision?.action === 'wait' && <p className="composer-guidance">Headline advice says to wait. No creative request can be made until Liquid suggests a test.</p>}
+          {decisionReady && (!headlinesValid || !promptValid) && <p className="composer-guidance">Use 2–3 unique headlines and a non-empty visual direction to continue.</p>}
           {decisionReady && state.headlines.length >= 2 && <p className="composer-guidance">Only the {state.manualEditing ? 'manually entered' : 'reviewed'} copy is sent; the preview uses a fixed “Join the waitlist” call to action.</p>}
         </div>
 
         <aside className="composer-side-note">
           <span className="composer-side-icon"><ImagePlus size={18} /></span>
           <strong>A reviewable draft, not a live ad</strong>
-          <p>Riff saves the generated image concept with the reviewed headlines. It does not create an ad, publish anything, allocate traffic, or collect analytics.</p>
+          <p>Riff saves the generated {state.mediaType} concept with the reviewed headlines. It does not create an ad, publish anything, allocate traffic, or collect analytics.</p>
           <div><ArrowDownToLine size={14} /> Saved jobs can be reopened from this campaign.</div>
         </aside>
       </div>
 
-      {state.jobs.length > 0 && <section className="image-job-list" aria-label="Saved image drafts">
+      {state.jobs.length > 0 && <section className="image-job-list" aria-label="Saved creative drafts">
         <div className="image-job-heading"><h3>Saved creative drafts</h3><span>{state.jobs.length} {state.jobs.length === 1 ? 'job' : 'jobs'}</span></div>
         {state.jobs.map((job) => <article className="image-job" key={job.id}>
           <div className="image-job-top"><div><strong>{job.mediaType === 'video' ? 'Video draft' : 'Image draft'}</strong><span className={`job-status job-${job.status}`}><i />{job.status === 'ready' ? 'Ready' : job.status === 'failed' ? 'Failed' : job.status === 'uncertain' ? 'Outcome uncertain' : 'Generating'}</span></div><time dateTime={job.createdAt}>{formatTime(job.createdAt)}</time></div>
-          {job.status === 'ready' ? <div className="image-ad-grid">{job.headlines.map((headline, index) => <article className="image-ad-card" key={`${job.id}-${index}`}>
-            <div className="image-ad-label">Version {variantLabel(index)} <span>Draft concept</span></div>
-            {job.mediaType === 'video' ? <video controls preload="metadata" src={job.videoUrl ?? `/api/creative-assets/${encodeURIComponent(job.id)}`} aria-label={`Video draft shared with Version ${variantLabel(index)}`} /> : <img src={`/api/creative-assets/${encodeURIComponent(job.id)}`} alt={`Generated image draft shared with Version ${variantLabel(index)}`} loading="lazy" />}
-            <h4>{headline}</h4><div className="mock-cta">Join the waitlist</div>
-            <p>Review before use · same image across versions</p>
-          </article>)}</div> : <div className="job-message">
-            {job.status === 'failed' ? job.error || 'This image request failed. Edit the visual direction or copy to start a distinct draft.' : job.status === 'uncertain' ? job.error || 'The image service did not confirm whether it completed. Reload saved jobs before starting another draft.' : 'The image request is still being processed. Reload saved jobs to check again.'}
+          {job.status === 'ready' ? <div className="image-ad-grid">{job.headlines.map((headline, index) => {
+            const kind = job.mediaType;
+            const src = kind === 'video' ? job.videoUrl ?? `/api/creative-assets/${encodeURIComponent(job.id)}` : `/api/creative-assets/${encodeURIComponent(job.id)}`;
+            const title = `Version ${variantLabel(index)} ${kind} draft`;
+            const alt = `${kind === 'video' ? 'Video' : 'Generated image'} draft shared with Version ${variantLabel(index)}`;
+            return <article className="image-ad-card" key={`${job.id}-${index}`}>
+              <div className="image-ad-label">Version {variantLabel(index)} <span>Draft concept</span></div>
+              {kind === 'video' ? <video controls preload="metadata" src={src} aria-label={alt} /> : <img src={src} alt={alt} loading="lazy" />}
+              <h4>{headline}</h4><div className="mock-cta">Join the waitlist</div>
+              <p>Review before use · same {kind} across versions</p>
+              <button className="media-open-button" type="button" aria-label={`${kind === 'video' ? 'Watch video' : 'View image'} for Version ${variantLabel(index)}`} onClick={() => {
+                document.querySelectorAll<HTMLVideoElement>('.image-ad-card video').forEach((video) => video.pause());
+                setViewer({ kind, src, title, alt });
+              }}>{kind === 'video' ? <Play size={13} /> : <Eye size={13} />} {kind === 'video' ? 'Watch video' : 'View image'}</button>
+            </article>;
+          })}</div> : <div className="job-message">
+            {job.status === 'failed' ? job.error || 'This creative request failed. Edit the visual direction or copy to start a distinct draft.' : job.status === 'uncertain' ? job.error || 'The creative service did not confirm whether it completed. Reload saved jobs before starting another draft.' : 'The creative request is still being processed. Reload saved jobs to check again.'}
           </div>}
-          <details className="job-direction"><summary>Image direction</summary><p>{job.imagePrompt}</p></details>
+          <details className="job-direction"><summary>Visual direction</summary><p>{job.imagePrompt}</p></details>
         </article>)}
       </section>}
+      {viewer && <CreativeMediaViewer kind={viewer.kind} src={viewer.src} title={viewer.title} alt={viewer.alt} onClose={() => setViewer(null)} />}
     </section>
   );
 }

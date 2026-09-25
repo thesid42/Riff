@@ -1,6 +1,6 @@
 # Riff
 
-Riff is a local campaign experiment workspace. It saves campaign briefs and presents campaign results when the API has real data. A campaign’s creative composer can request editable Liquid headline suggestions and, only after an explicit user action, create paid BFL image drafts. It does not simulate traffic or start campaigns.
+Riff is a local campaign experiment workspace. It saves campaign briefs and presents campaign results when the API has real data. A campaign’s creative composer can request editable Liquid headline suggestions and, only after an explicit user action, create paid BFL image or video drafts. It does not simulate traffic or start campaigns.
 
 Riff is intended for local, single-user use. The server binds to loopback and has no authentication for public hosting.
 
@@ -15,7 +15,8 @@ Implemented:
 - Results-first dashboard with campaign selection, metric details, experiments, lessons, and provider configuration status.
 - Campaign drafts persisted in SQLite. Saving a draft does not start traffic or creative generation.
 - Creative composer with editable Liquid headline suggestions, manual-copy fallback, and explicit paid BFL image generation. Generated images and their shared headline variants are saved as reviewable drafts.
-- Video controls are capability-gated by the server and disabled unless video generation is enabled there.
+- Video generation is enabled with `BFL_VIDEO_ENABLED=true`. Controls include duration, aspect ratio, HD/Full HD resolution, audio, and draft quality; draft quality requires HD. It is disabled by default.
+- Each saved variant has a **View image** or **Watch video** action. The focused viewer shows the complete image or a video with playback controls; **Open original** opens the locally saved asset in its own tab. Viewing saved media does not call a generation provider.
 - Server-side adapter foundations for Liquid AI, RawTree, classic Tinybird, and Black Forest Labs.
 - Empty analytics shown as not started; rates and costs without outcomes shown as “—”.
 
@@ -72,7 +73,7 @@ Event spend uses integer cents. Events carry stable IDs, and metric queries dedu
 
 ### Black Forest Labs
 
-Set `BFL_API_KEY`; `BFL_MODEL` selects the image endpoint. The [BFL generation guide](https://docs.bfl.ai/quick_start/generating_images) describes submission, status checks, and result delivery. Image generation is available only through the reviewed creative composer action and uses BFL credits; returned image assets are saved locally for later review. Video generation uses `BFL_VIDEO_MODEL=flux-3-video` and is gated by `BFL_VIDEO_ENABLED`, which defaults to `false`. Generated concepts remain drafts and are not ads or campaign launches.
+Set `BFL_API_KEY`; `BFL_MODEL` selects the image endpoint. The [BFL generation guide](https://docs.bfl.ai/quick_start/generating_images) describes submission, status checks, and result delivery. Image generation is available only through the reviewed creative composer action and uses BFL credits; returned image assets are saved locally for later review. Video generation uses `BFL_VIDEO_MODEL=flux-3-video` and is gated by `BFL_VIDEO_ENABLED`, which defaults to `false`. Set it to `true` and restart the server to enable the Video selector. The [FLUX 3 API reference](https://docs.bfl.ai/api-reference/utility/generate-a-video-with-flux-3) documents the text-to-video contract. Riff starts with a five-second HD draft and audio off; each explicit generation uses credits. Generated concepts remain drafts and are not ads or campaign launches.
 
 ## Verification
 
@@ -82,7 +83,7 @@ npm test
 npm run build
 ```
 
-Automated tests use temporary SQLite databases and injected HTTP fixtures; they do not contact live providers or start a campaign. A separate manual live smoke test exercised one campaign from Liquid headline advice through reviewed copy, BFL image generation, local asset display, and reload. That generated image contained unwanted lettering and requires human review. No live video request was tested.
+Automated tests use temporary SQLite databases and injected HTTP fixtures; they do not contact live providers or start a campaign. Separate manual live smoke tests exercised one campaign from Liquid headline advice through reviewed copy, BFL image generation, local asset display, and reload, followed by one five-second HD draft video with audio off. The video was saved locally as an MP4; browser decoding and byte-range delivery were verified. The generated image contained unwanted lettering and requires human review. These checks establish integration behavior, not creative quality or campaign performance.
 
 ## Project structure
 

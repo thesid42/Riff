@@ -1,10 +1,11 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { CreativeImageJob } from '../shared/creative.js';
-import type { BflClient, LiquidClient } from '../server/providers/index.js';
+import { BflVideoClient, createProviders, getIntegrationStatuses, type BflClient, type LiquidClient } from '../server/providers/index.js';
 import { ProviderError } from '../server/providers/index.js';
 import { createApp } from '../server/app.js';
 import { CampaignDatabase } from '../server/database.js';
@@ -195,6 +196,23 @@ describe('creative composer API', () => {
     expect(disabled.json().error.code).toBe('video_provider_unavailable');
   });
 
+  it('creates the video adapter only when explicitly enabled and never probes the provider', () => {
+    const urls: string[] = [];
+    const fetch = async (input: RequestInfo | URL): Promise<Response> => { urls.push(String(input)); throw new Error('Unexpected network access.'); };
+    const disabled = createProviders({ BFL_API_KEY: 'offline-fixture-key' }, fetch);
+    expect(disabled.videoEnabled).toBe(false);
+    expect(disabled.video).toBeUndefined();
+
+    const enabled = createProviders({ BFL_API_KEY: 'offline-fixture-key', BFL_VIDEO_ENABLED: 'true', BFL_VIDEO_MODEL: 'flux-3-video' }, fetch);
+    expect(enabled.videoEnabled).toBe(true);
+    expect(enabled.video).toBeInstanceOf(BflVideoClient);
+    expect(urls).toEqual([]);
+    expect(getIntegrationStatuses({ BFL_API_KEY: 'offline-fixture-key', BFL_VIDEO_ENABLED: 'true', BFL_VIDEO_MODEL: 'flux-3-video' })
+      .find(status => status.id === 'bfl')?.status).toBe('configured');
+    expect(getIntegrationStatuses({ BFL_API_KEY: 'offline-fixture-key', BFL_VIDEO_ENABLED: 'yes' })
+      .find(status => status.id === 'bfl')?.status).toBe('invalid');
+  });
+
   it('submits an explicitly enabled video once, persists options/task first, and serves bounded MP4 ranges', async () => {
     const fixture = fakeProviders();
     const videoBytes = new Uint8Array([0, 0, 0, 12, 0x66, 0x74, 0x79, 0x70, 0x6d, 0x70, 0x34, 0x32]);
@@ -268,5 +286,45 @@ describe('creative composer API', () => {
     expect(JSON.stringify(creative.json())).not.toContain('pollingUrl');
     const unavailableAsset = await app.inject({ method: 'GET', url: `/api/creative-assets/${imageRequest.requestId}` });
     expect(unavailableAsset.statusCode).toBe(404);
+  });
+
+  it('migrates v2 image jobs into the media schema and marks interrupted tasks uncertain', async () => {
+    const id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+    const legacy = new DatabaseSync(databasePath);
+    legacy.exec(`
+      CREATE TABLE campaigns (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, product TEXT NOT NULL, audience TEXT NOT NULL,
+        goal TEXT NOT NULL, approved_claims TEXT NOT NULL, budget_cents INTEGER NOT NULL,
+        currency TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE creative_image_jobs (
+        id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+        request_hash TEXT NOT NULL, headlines TEXT NOT NULL, image_prompt TEXT NOT NULL, model TEXT NOT NULL,
+        width INTEGER NOT NULL CHECK (width = 1024), height INTEGER NOT NULL CHECK (height = 1024),
+        status TEXT NOT NULL CHECK (status IN ('submitting', 'generating', 'ready', 'failed', 'uncertain')),
+        image_url TEXT, error TEXT, provider_task_id TEXT, polling_url TEXT,
+        content_type TEXT CHECK (content_type IS NULL OR content_type IN ('image/png', 'image/jpeg', 'image/webp')),
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE UNIQUE INDEX one_active_creative_job_per_campaign ON creative_image_jobs(campaign_id)
+        WHERE status IN ('submitting', 'generating', 'uncertain');
+      INSERT INTO campaigns VALUES ('${id}', 'Old campaign', 'Bottle', 'Workers', 'signups', '["750ml"]', 1000, 'USD', 'draft', '2026-09-24T00:00:00.000Z', '2026-09-24T00:00:00.000Z');
+      INSERT INTO creative_image_jobs VALUES (
+        'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', '${id}', '${'f'.repeat(64)}', '["Headline one","Headline two"]', 'A bottle on a table.', 'flux-2-pro',
+        1024, 1024, 'generating', null, null, 'old-task', 'https://api.bfl.ai/v1/get_result?id=old-task', null,
+        '2026-09-24T00:00:00.000Z', '2026-09-24T00:00:00.000Z'
+      );
+      PRAGMA user_version = 2;
+    `);
+    legacy.close();
+
+    app = createApp({ databasePath, assetDir });
+    const response = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` });
+    expect(response.statusCode).toBe(200);
+    expect(response.json().jobs[0]).toMatchObject({
+      id: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', mediaType: 'image', status: 'uncertain',
+      videoUrl: null, videoOptions: null, providerTaskId: 'old-task',
+    });
+    expect(response.json().jobs[0]).not.toHaveProperty('pollingUrl');
   });
 });

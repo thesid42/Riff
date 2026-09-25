@@ -20,13 +20,13 @@ function job(overrides: Partial<CreativeImageJob> = {}): CreativeImageJob {
   };
 }
 
-function installFetch(options: { decision?: unknown; job?: CreativeImageJob } = {}) {
+function installFetch(options: { decision?: unknown; job?: CreativeImageJob; jobs?: CreativeImageJob[]; videoEnabled?: boolean } = {}) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     calls.push({ url, init });
     let body: unknown;
-    if (url.endsWith('/creative')) body = { imagePromptSuggestion: 'Bottle on a soft sage studio surface; leave clear space around it.', capabilities: { image: true, video: false }, jobs: [] };
+    if (url.endsWith('/creative')) body = { imagePromptSuggestion: 'Bottle on a soft sage studio surface; leave clear space around it.', capabilities: { image: true, video: options.videoEnabled ?? false }, jobs: options.jobs ?? [] };
     else if (url.endsWith('/creative/plan')) body = { decision: options.decision ?? { action: 'propose_test', explanation: 'Compare two factual headlines.', hypothesis: 'The capacity detail may help visitors understand the product.', headlines: ['A 750 ml bottle for every day', 'Steel, made for repeat use'], evidenceIds: [] }, metadata: { model: 'fixture', elapsedMs: 42 } };
     else if (url.endsWith('/creative/images')) body = { job: options.job ?? job() };
     else body = { error: { message: 'Unexpected test request.' } };
@@ -37,7 +37,7 @@ function installFetch(options: { decision?: unknown; job?: CreativeImageJob } = 
   return calls;
 }
 
-afterEach(() => { cleanup(); localStorage.clear(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); document.body.style.overflow = ''; localStorage.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('creative composer', () => {
   it('waits for an explicit paid action and reuses one saved image across reviewed headlines', async () => {
@@ -75,6 +75,66 @@ describe('creative composer', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Suggest headlines' }));
     await screen.findByRole('alert');
     expect(document.body.contains(screen.getByText(/Liquid returned an invalid response/))).toBe(true);
+    expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
+  });
+
+  it('opens a full image in the focused viewer, opens the original separately, and restores focus on Escape without a provider call', async () => {
+    const calls = installFetch({ jobs: [job()] });
+    document.body.style.overflow = 'clip';
+    render(<CreativeComposer campaign={campaign} />);
+    const openButton = await screen.findByRole('button', { name: 'View image for Version A' });
+    openButton.focus();
+    fireEvent.click(openButton);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Version A image draft' });
+    expect(document.body.style.overflow).toBe('hidden');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close media viewer' }));
+    const image = dialog.querySelector('img');
+    expect(image?.getAttribute('src')).toBe('/api/creative-assets/creative-job-1');
+    expect(image?.getAttribute('alt')).toContain('Version A');
+    const original = screen.getByRole('link', { name: /Open original/ });
+    expect(original.getAttribute('target')).toBe('_blank');
+    expect(original.getAttribute('rel')).toContain('noopener');
+    fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(original);
+    fireEvent.keyDown(dialog, { key: 'Tab' });
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close media viewer' }));
+
+    fireEvent.keyDown(dialog, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(openButton);
+    expect(document.body.style.overflow).toBe('clip');
+    expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
+  });
+
+  it('opens a video with native controls and metadata-only preload, then closes without autoplay or generation', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    const videoJob = job({
+      id: 'creative-video-1',
+      mediaType: 'video',
+      imageUrl: null,
+      videoUrl: '/api/creative-assets/creative-video-1',
+      videoOptions: { durationSeconds: 5, resolution: 'hd', aspectRatio: '1:1', generateAudio: false, draft: true },
+    });
+    const calls = installFetch({ jobs: [videoJob], videoEnabled: true });
+    render(<CreativeComposer campaign={campaign} />);
+    const openButton = await screen.findByRole('button', { name: 'Watch video for Version A' });
+    openButton.focus();
+    fireEvent.click(openButton);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Version A video draft' });
+    expect(HTMLMediaElement.prototype.pause).toHaveBeenCalled();
+    const video = dialog.querySelector('video');
+    expect(video).not.toBeNull();
+    expect(video?.controls).toBe(true);
+    expect(video?.preload).toBe('metadata');
+    expect(video?.autoplay).toBe(false);
+    expect(video?.getAttribute('src')).toBe('/api/creative-assets/creative-video-1');
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close media viewer' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close media viewer' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(document.activeElement).toBe(openButton);
     expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
   });
 });

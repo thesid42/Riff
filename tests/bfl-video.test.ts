@@ -145,6 +145,8 @@ describe('BFL video adapter', () => {
     const fixture = captureFetch(() => responseJson({ id: taskId, status, result: null }));
     const client = new BflVideoClient('bfl-secret', fixture.fetch);
     await expect(client.poll({ id: taskId, pollingUrl })).resolves.toEqual({ status: 'Request Moderated' });
+    status = 'Failed';
+    await expect(client.poll({ id: taskId, pollingUrl })).resolves.toEqual({ status: 'Failed' });
     status = 'Error';
     await expect(client.poll({ id: taskId, pollingUrl })).resolves.toEqual({ status: 'Error' });
     status = 'Unrecognized';
