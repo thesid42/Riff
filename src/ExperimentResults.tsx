@@ -85,7 +85,9 @@ function ExperimentRecord({ experiment, variants, metrics, historical = false }:
     })}</div>
     {variants.length === 0 && <p className="experiment-record-explanation">The saved versions are not available yet.</p>}
     {!historical && <p className="experiment-metric-caption">Sign-up rate = simulated sign-ups ÷ responses. These are model predictions, not real ad traffic.</p>}
-    <details className="experiment-record-detail"><summary>Experiment details</summary><p>{experiment.hypothesis}</p>{historical && <p>Historical version snapshot. Live metrics are shown only for the latest wave.</p>}</details>
+    {historical
+      ? <div className="experiment-record-detail historical-experiment-detail"><strong>Experiment details</strong><p>{experiment.hypothesis}</p><p>Historical version snapshot. Live metrics are shown only for the latest wave.</p></div>
+      : <details className="experiment-record-detail"><summary>Experiment details</summary><p>{experiment.hypothesis}</p></details>}
     {media && currentMedia && <CreativeMediaViewer kind={currentMedia.kind} src={currentMedia.src} title={currentMedia.title} alt={currentMedia.title} onClose={() => setMedia(null)} navigation={{
       index: media.index, count: media.items.length,
       onPrevious: () => setMedia((current) => current ? { ...current, index: Math.max(0, current.index - 1) } : null),

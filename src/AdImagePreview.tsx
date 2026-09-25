@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { ArrowDownToLine, ExternalLink } from 'lucide-react';
+import { ArrowDownToLine, Eye } from 'lucide-react';
 import { drawFinishedAd, finishedAdPngBlob, loadFinishedAdImage } from './ad-image.js';
 import './ad-images.css';
 
@@ -8,9 +8,10 @@ export interface AdImagePreviewProps {
   headline: string;
   versionLabel: string;
   onInspect: (previewUrl: string) => void;
+  onInspectOriginal: () => void;
 }
 
-export default function AdImagePreview({ imageUrl, headline, versionLabel, onInspect }: AdImagePreviewProps) {
+export default function AdImagePreview({ imageUrl, headline, versionLabel, onInspect, onInspectOriginal }: AdImagePreviewProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const descriptionId = useId();
   const requestVersion = useRef(0);
@@ -93,15 +94,16 @@ export default function AdImagePreview({ imageUrl, headline, versionLabel, onIns
       </canvas>
     </div>
     <p id={descriptionId} className="finished-ad-description">Finished 1080 by 1350 portrait ad. Headline: {headline}. Call to action: Join the waitlist. The complete original photo is fitted without cropping.</p>
-    <div className="finished-ad-tools">
-      <span className="finished-ad-size">Portrait ad · 1080 × 1350</span>
-      <button type="button" className="finished-ad-original" onClick={() => void inspectFinishedAd()} disabled={status !== 'ready'}>
-        <ExternalLink size={14} /> Inspect full size
+    <div className="finished-ad-tools" aria-label={`Actions for Version ${versionLabel}`}>
+      <button type="button" className="finished-ad-export" onClick={() => void inspectFinishedAd()} disabled={status !== 'ready'}>
+        <Eye size={15} /> Inspect finished ad
       </button>
       <button type="button" className="finished-ad-export" onClick={() => void downloadFinishedAd()} disabled={status !== 'ready'}>
-        <ArrowDownToLine size={15} /> {status === 'loading' ? 'Preparing preview…' : 'Download finished ad PNG'}
+        <ArrowDownToLine size={15} /> {status === 'loading' ? 'Preparing…' : 'Download finished ad'}
       </button>
-      <a className="finished-ad-original" href={imageUrl} download={`riff-original-version-${versionLabel.toLowerCase()}`}><ArrowDownToLine size={14} /> Download original</a>
+      <button type="button" className="finished-ad-source-link" aria-label={`Inspect original photo for Version ${versionLabel}`} onClick={onInspectOriginal}>
+        Original photo
+      </button>
     </div>
     {error && <p className="finished-ad-error" role="status">{error}</p>}
   </section>;

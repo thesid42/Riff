@@ -1,22 +1,21 @@
 .finished-ad-preview {
   display: grid;
-  gap: 10px;
-  margin-top: 12px;
-  padding: 11px;
-  border: 1px solid #e6e8df;
-  border-radius: 11px;
-  background: #f8f7f2;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .finished-ad-canvas-frame {
-  width: min(100%, 360px);
+  width: min(100%, 320px);
   aspect-ratio: 4 / 5;
   margin-inline: auto;
   overflow: hidden;
-  border: 1px solid #dedfd7;
-  border-radius: 7px;
+  border: 1px solid #e5e8e2;
+  border-radius: 4px;
   background: #f7f5ef;
-  box-shadow: 0 5px 18px rgba(39, 48, 39, .08);
 }
 
 .finished-ad-canvas-frame canvas {
@@ -39,37 +38,27 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 7px 10px;
+  gap: 8px 10px;
 }
 
-.finished-ad-size {
-  margin-right: auto;
-  color: #667268;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.finished-ad-export,
-.finished-ad-original {
-  min-height: 38px;
+.finished-ad-export {
+  min-height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 7px;
-  padding: 0 11px;
-  border: 1px solid #d9e2d7;
+  padding: 0 13px;
+  border: 1px solid #d1dfcf;
   border-radius: 8px;
   color: #365b3f;
-  background: #fff;
-  font: 600 12px/1.35 'DM Sans', 'Segoe UI', sans-serif;
-  text-decoration: none;
+  background: #f5f8f3;
+  font: 600 14px/1.35 'DM Sans', 'Segoe UI', sans-serif;
   cursor: pointer;
 }
 
-.finished-ad-export:hover:not(:disabled),
-.finished-ad-original:hover {
+.finished-ad-export:hover:not(:disabled) {
   border-color: #c2d3c1;
-  background: #f3f7f1;
+  background: #edf4eb;
 }
 
 .finished-ad-export:disabled {
@@ -77,9 +66,26 @@
   cursor: not-allowed;
 }
 
-.finished-ad-original:disabled {
-  opacity: .55;
-  cursor: not-allowed;
+.finished-ad-source-link {
+  min-height: 44px;
+  padding: 0 4px;
+  border: 0;
+  color: #55745a;
+  background: transparent;
+  font: 500 14px/1.4 'DM Sans', 'Segoe UI', sans-serif;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.finished-ad-source-link:hover {
+  color: #315b40;
+}
+
+.finished-ad-source-link:focus-visible {
+  outline: 3px solid rgba(74, 125, 87, .34);
+  outline-offset: 2px;
+  border-radius: 3px;
 }
 
 .finished-ad-error {
@@ -95,12 +101,8 @@
 }
 
 @media (max-width: 640px) {
-  .finished-ad-size {
-    width: 100%;
-  }
-
   .finished-ad-export,
-  .finished-ad-original {
+  .finished-ad-source-link {
     flex: 1 1 auto;
   }
 }

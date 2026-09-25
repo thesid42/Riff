@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertCircle, ArrowDownToLine, Eye, ImagePlus, LoaderCircle, Play, Plus, RefreshCw, Sparkles, X } from 'lucide-react';
+import { AlertCircle, ArrowDownToLine, ImagePlus, LoaderCircle, Play, Plus, RefreshCw, Sparkles, X } from 'lucide-react';
 import type { Campaign } from '../shared/types.js';
 import type { CreativeImageJob, CreativeVariantOutput, CreativeVideoOptions } from '../shared/creative.js';
 import { countHeadlineCharacters, HEADLINE_MAX_LENGTH, isStoredHeadlineSet, isValidHeadlineSet } from '../shared/headlines.js';
@@ -752,12 +752,11 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
 
       <section className="current-generation" aria-label="Latest creative">
         <div className="current-generation-heading">
-          <div><span className="section-kicker">LATEST CREATIVE</span><h3>Current generation</h3></div>
-          {featuredJob && <span className={`current-generation-badge current-generation-${featuredJob.status}`}>{featuredJob.status === 'ready' ? 'Ready' : featuredJob.status === 'failed' ? 'Needs attention' : featuredJob.status === 'uncertain' ? 'Outcome uncertain' : 'In progress'}</span>}
+          <div><span className="section-kicker">LATEST CREATIVE</span><h3>Latest generation</h3></div>
           {!featuredJob && state.generationLoading && <span className="current-generation-badge current-generation-loading">Submitting</span>}
         </div>
         {featuredJob
-          ? <SavedCreativeJob job={featuredJob} expanded selected={selectedCreativeJobId === featuredJob.id}
+          ? <SavedCreativeJob key={featuredJob.id} job={featuredJob} expanded selected={selectedCreativeJobId === featuredJob.id}
             onUse={() => onUseForExperiment?.(featuredJob, featuredJob.headlines)}
             onInspectFinished={openFinishedGallery}
             onOpen={(job, index) => {
@@ -778,7 +777,7 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
       {archivedJobs.length > 0 && <details key={campaign.id} className="image-job-list" aria-label="Saved creative drafts"
         onToggle={(event) => {
           setSavedJobsOpen(event.currentTarget.open);
-          if (!event.currentTarget.open) document.querySelectorAll<HTMLVideoElement>('.image-ad-card video').forEach((video) => video.pause());
+          if (!event.currentTarget.open) event.currentTarget.querySelectorAll<HTMLVideoElement>('.image-ad-card video').forEach((video) => video.pause());
         }}>
         <summary className="saved-creative-summary">
           <span className="saved-creative-summary-title">Saved creative drafts</span>
@@ -828,6 +827,7 @@ function SavedCreativeJob({ job, expanded, selected, onUse, onOpen, onInspectFin
   onOpen: (job: CreativeImageJob, versionIndex: number) => void;
   onInspectFinished: (previewUrl: string, job: CreativeImageJob, versionIndex: number) => void;
 }) {
+  const [showDirections, setShowDirections] = useState(false);
   const distinct = job.visualMode === 'distinct' && Array.isArray(job.outputs);
   const variants: DraftVariant[] = distinct
     ? (job.outputs ?? []).map((output) => ({ index: output.index, headline: output.headline, status: output.status, imagePrompt: output.imagePrompt, imageUrl: output.imageUrl, videoUrl: output.videoUrl, error: output.error, assetId: output.id }))
@@ -846,41 +846,47 @@ function SavedCreativeJob({ job, expanded, selected, onUse, onOpen, onInspectFin
       <div><strong>{job.mediaType === 'video' ? 'Video draft' : 'Image draft'}</strong><span className={`job-status job-${job.status}`}><i />{job.status === 'ready' ? 'Ready' : job.status === 'failed' ? 'Some requests failed' : job.status === 'uncertain' ? 'Outcome uncertain' : 'Generating'}</span></div>
       <time dateTime={job.createdAt}>{formatTime(job.createdAt)}</time>
     </div>
-    <p className="visual-mode-note">{distinct ? `${completedCount} of ${variants.length} separate visuals ready` : 'One shared visual across versions'}</p>
+    <p className="visual-mode-note">{distinct ? `${completedCount} of ${variants.length} versions ready` : `One ${job.mediaType} shared across versions`}</p>
     {variants.length > 0 ? <div className="image-ad-grid">{variants.map((variant) => {
       const kind = job.mediaType;
       const assetPath = `/api/creative-assets/${encodeURIComponent(variant.assetId)}`;
       const src = kind === 'video' ? variant.videoUrl ?? assetPath : variant.imageUrl ?? assetPath;
       const label = variantLabel(variant.index);
-      const title = `Version ${label} ${kind} draft`;
       const alt = `${kind === 'video' ? 'Video' : 'Generated image'} draft for Version ${label}`;
       return <article className={`image-ad-card output-${variant.status}`} key={`${job.id}-${variant.index}`}>
-        <div className="image-ad-label">Version {label} <span>{variant.status === 'ready' ? 'Draft concept' : outputStatusLabel(variant.status)}</span></div>
+        <div className="image-ad-label"><span className="image-ad-version">Version {label}</span>{variant.status !== 'ready' && <span>{outputStatusLabel(variant.status)}</span>}</div>
         {variant.status === 'ready' ? <>
-          {kind === 'video' ? <video controls preload="metadata" src={src} aria-label={alt} /> : !expanded ? <img className="image-ad-source" src={src} alt={alt} loading="lazy" /> : null}
-          <h4>{variant.headline}</h4>
-          {(kind === 'video' || !expanded) && <div className="mock-cta">Join the waitlist</div>}
-          <p>Review before use · {distinct ? 'distinct' : 'shared'} {kind}</p>
-          {kind === 'image' && expanded && <AdImagePreview imageUrl={src} headline={variant.headline} versionLabel={label}
-            onInspect={(previewUrl) => onInspectFinished(previewUrl, job, variant.index)} />}
-          <button className="media-open-button" type="button" aria-label={`${kind === 'video' ? 'Watch video' : 'View image'} for Version ${label}`} onClick={() => {
-            document.querySelectorAll<HTMLVideoElement>('.image-ad-card video').forEach((video) => video.pause());
-            onOpen(job, variant.index);
-          }}>{kind === 'video' ? <Play size={13} /> : <Eye size={13} />} {kind === 'video' ? 'Watch video' : 'View image'}</button>
+          {kind === 'video' ? <>
+            <h4 className="image-ad-headline">{variant.headline}</h4>
+            <video controls preload="metadata" src={src} aria-label={alt} />
+            <div className="creative-version-actions">
+              <button className="button button-secondary" type="button" aria-label={`Open original video for Version ${label}`} onClick={() => onOpen(job, variant.index)}><Play size={15} /> Open original video</button>
+            </div>
+          </> : expanded && <AdImagePreview imageUrl={src} headline={variant.headline} versionLabel={label}
+            onInspect={(previewUrl) => onInspectFinished(previewUrl, job, variant.index)}
+            onInspectOriginal={() => onOpen(job, variant.index)} />}
         </> : <div className="output-pending" role="status">
           <span>{outputStatusLabel(variant.status)}</span>
           {variant.error && <small>{variant.error}</small>}
         </div>}
-        <details className="job-direction"><summary>Version {label} direction</summary><p>{variant.imagePrompt}</p></details>
       </article>;
     })}</div> : <div className="job-message">
       {job.status === 'failed' ? job.error || 'This creative request failed. Edit the visual direction or copy to start a distinct draft.' : job.status === 'uncertain' ? job.error || 'The creative service did not confirm whether it completed. Reload saved jobs before starting another draft.' : 'The creative request is still being processed. Reload saved jobs to check again.'}
     </div>}
-    {!distinct && <details className="job-direction"><summary>Shared visual direction</summary><p>{job.imagePrompt}</p></details>}
-    {onUse && jobIsReady(job) && <div className="creative-experiment-select">
-      <button type="button" className={selected ? 'button button-secondary' : 'button button-primary'} aria-pressed={selected} aria-describedby={!headlineSetValid ? `saved-headline-limit-${job.id}` : undefined} disabled={!canUse} onClick={onUse}>{selected ? 'Selected' : 'Select for experiment'}</button>
-      {!headlineSetValid && <p id={`saved-headline-limit-${job.id}`} className="composer-guidance">{selectionProblem}</p>}
-    </div>}
+    <div className="creative-job-tools">
+      <button className="job-directions-toggle" type="button" aria-expanded={showDirections} aria-controls={`directions-${job.id}`} onClick={() => setShowDirections((open) => !open)}>
+        {showDirections ? 'Hide generation directions' : 'View generation directions'}
+      </button>
+      {onUse && jobIsReady(job) && <div className="creative-experiment-select">
+        <button type="button" className={selected ? 'button button-secondary' : 'button button-primary'} aria-pressed={selected} aria-describedby={!headlineSetValid ? `saved-headline-limit-${job.id}` : undefined} disabled={!canUse} onClick={onUse}>{selected ? 'Selected' : 'Select for experiment'}</button>
+        {!headlineSetValid && <p id={`saved-headline-limit-${job.id}`} className="composer-guidance">{selectionProblem}</p>}
+      </div>}
+    </div>
+    {showDirections && <section className="job-directions-panel" id={`directions-${job.id}`} aria-label="Generation directions">
+      {distinct ? variants.map((variant) => <div className="job-direction-entry" key={variant.index}>
+        <h5>Version {variantLabel(variant.index)}</h5><p>{variant.imagePrompt}</p>
+      </div>) : <div className="job-direction-entry"><h5>Shared direction</h5><p>{job.imagePrompt}</p></div>}
+    </section>}
     {distinct && !jobIsReady(job) && <p className="composer-guidance">A partial result can be reviewed above. Wait until every version is ready before attaching it to an experiment.</p>}
   </article>;
 }

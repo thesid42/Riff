@@ -195,7 +195,7 @@ describe('creative composer', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Generate 3 images' }));
     const latest = await screen.findByRole('region', { name: 'Latest creative' });
-    expect(within(latest).getByText('3 of 3 separate visuals ready')).toBeTruthy();
+    expect(within(latest).getByText('3 of 3 versions ready')).toBeTruthy();
 
     const imageCall = calls.find((call) => call.url.endsWith('/creative/images'));
     expect(imageCall).toBeDefined();
@@ -214,11 +214,17 @@ describe('creative composer', () => {
     expect(latest.querySelectorAll('.finished-ad-description')).toHaveLength(3);
     expect(latest.querySelector('.finished-ad-description')?.textContent).toContain('Join the waitlist');
 
-    const savedDirection = [...latest.querySelectorAll<HTMLElement>('.image-job .job-direction summary')]
-      .find((summary) => summary.textContent === 'Version A direction');
-    expect(savedDirection).toBeDefined();
-    fireEvent.click(savedDirection!);
-    expect(savedDirection?.closest('.job-direction')?.querySelector('p')?.textContent).toBe(customDirection);
+    expect(latest.querySelectorAll('.job-direction')).toHaveLength(0);
+    expect(latest.querySelectorAll('.media-open-button')).toHaveLength(0);
+    expect(latest.querySelectorAll('details')).toHaveLength(0);
+    expect(within(latest).getByRole('button', { name: 'Inspect original photo for Version A' })).toBeTruthy();
+    expect(within(latest).getByRole('button', { name: 'Inspect finished ad' })).toBeTruthy();
+    expect(within(latest).getByRole('button', { name: 'Download finished ad' })).toBeTruthy();
+    const directionsButton = within(latest).getByRole('button', { name: 'View generation directions' });
+    expect(directionsButton.getAttribute('aria-expanded')).toBe('false');
+    fireEvent.click(directionsButton);
+    expect(directionsButton.getAttribute('aria-expanded')).toBe('true');
+    expect(within(latest).getByText(customDirection)).toBeTruthy();
   });
 
   it('hydrates valid legacy headlines and enables generation without requiring Liquid provenance', async () => {
@@ -234,14 +240,14 @@ describe('creative composer', () => {
     await expandVersions();
     expect((screen.getByRole('textbox', { name: 'Version A headline' }) as HTMLInputElement).value).toBe('Saved headline one');
     const latest = screen.getByRole('region', { name: 'Latest creative' });
-    expect(within(latest).getByRole('button', { name: 'View image for Version A' })).toBeTruthy();
+    expect(within(latest).getByRole('button', { name: 'Inspect original photo for Version A' })).toBeTruthy();
     const summaryTitle = screen.getByText('Saved creative drafts', { exact: true });
     const closedGallery = summaryTitle.closest('details');
     expect(closedGallery?.open).toBe(false);
     const gallery = await expandSavedDrafts();
     expect(gallery.open).toBe(true);
-    expect(within(latest).getByText('One shared visual across versions')).toBeTruthy();
-    expect(within(gallery).getByRole('button', { name: 'View image for Version A' })).toBeTruthy();
+    expect(within(latest).getByText('One image shared across versions')).toBeTruthy();
+    expect(within(gallery).getByRole('button', { name: 'Inspect original photo for Version A' })).toBeTruthy();
     expect(within(gallery).getByText('Older saved headline one')).toBeTruthy();
     expect(within(gallery).queryByText('Saved headline one')).toBeNull();
     expect(latest.querySelectorAll('.finished-ad-preview')).toHaveLength(2);
@@ -369,8 +375,8 @@ describe('creative composer', () => {
     installFetch({ jobs: [partial] });
     render(<CreativeComposer campaign={{ ...campaign, headlines: partial.headlines }} />);
     const latest = screen.getByRole('region', { name: 'Latest creative' });
-    expect(await within(latest).findByRole('button', { name: 'View image for Version A' })).toBeTruthy();
-    expect(within(latest).getByText('1 of 2 separate visuals ready')).toBeTruthy();
+    expect(await within(latest).findByRole('button', { name: 'Inspect original photo for Version A' })).toBeTruthy();
+    expect(within(latest).getByText('1 of 2 versions ready')).toBeTruthy();
     expect(await within(latest).findByText('Provider could not finish.')).toBeTruthy();
   });
 
@@ -390,7 +396,7 @@ describe('creative composer', () => {
     document.body.style.overflow = 'clip';
     render(<CreativeComposer campaign={campaign} />);
     const latest = await screen.findByRole('region', { name: 'Latest creative' });
-    const openButton = within(latest).getByRole('button', { name: 'View image for Version A' });
+    const openButton = within(latest).getByRole('button', { name: 'Inspect original photo for Version A' });
     openButton.focus();
     fireEvent.click(openButton);
 
@@ -441,7 +447,7 @@ describe('creative composer', () => {
     const calls = installFetch({ jobs: [videoJob], videoEnabled: true });
     render(<CreativeComposer campaign={campaign} />);
     const latest = await screen.findByRole('region', { name: 'Latest creative' });
-    const openButton = within(latest).getByRole('button', { name: 'Watch video for Version A' });
+    const openButton = within(latest).getByRole('button', { name: 'Open original video for Version A' });
     openButton.focus();
     fireEvent.click(openButton);
 
@@ -476,7 +482,7 @@ describe('creative composer', () => {
     const calls = installFetch({ jobs: [currentJob, olderJob] });
     render(<CreativeComposer campaign={{ ...campaign, headlines: currentJob.headlines }} />);
     const latest = await screen.findByRole('region', { name: 'Latest creative' });
-    fireEvent.click(await within(latest).findByRole('button', { name: 'View image for Version C' }));
+    fireEvent.click(await within(latest).findByRole('button', { name: 'Inspect original photo for Version C' }));
 
     const dialog = await screen.findByRole('dialog', { name: 'Version C image draft' });
     expect(screen.getByText('3 of 3')).toBeTruthy();
@@ -511,7 +517,7 @@ describe('creative composer', () => {
     const calls = installFetch({ jobs: [currentJob, olderJob] });
     render(<CreativeComposer campaign={{ ...campaign, headlines: currentJob.headlines }} />);
     const latest = await screen.findByRole('region', { name: 'Latest creative' });
-    fireEvent.click(await within(latest).findByRole('button', { name: 'View image for Version C' }));
+    fireEvent.click(await within(latest).findByRole('button', { name: 'Inspect original photo for Version C' }));
 
     const dialog = await screen.findByRole('dialog', { name: 'Version C image draft' });
     expect(screen.getByText('2 of 2')).toBeTruthy();
@@ -541,7 +547,7 @@ describe('creative composer', () => {
     render(<CreativeComposer campaign={{ ...campaign, headlines: shared.headlines }} />);
     const latest = await screen.findByRole('region', { name: 'Latest creative' });
     const firstPreview = latest.querySelector('.finished-ad-preview') as HTMLElement;
-    const inspect = within(firstPreview).getByRole('button', { name: 'Inspect full size' });
+    const inspect = within(firstPreview).getByRole('button', { name: 'Inspect finished ad' });
     await waitFor(() => expect((inspect as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(inspect);
 
@@ -571,7 +577,7 @@ describe('creative composer', () => {
     render(<CreativeComposer campaign={{ ...campaign, headlines: shared.headlines }} />);
     const latest = await screen.findByRole('region', { name: 'Latest creative' });
     const firstPreview = latest.querySelector('.finished-ad-preview') as HTMLElement;
-    const inspect = within(firstPreview).getByRole('button', { name: 'Inspect full size' });
+    const inspect = within(firstPreview).getByRole('button', { name: 'Inspect finished ad' });
     await waitFor(() => expect((inspect as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(inspect);
     const dialog = await screen.findByRole('dialog', { name: 'Finished ad for Version A' });
@@ -611,11 +617,11 @@ describe('creative composer', () => {
     const latest = await screen.findByRole('region', { name: 'Latest creative' });
     fireEvent.click(screen.getByRole('button', { name: 'Generate 2 images' }));
 
-    expect(await within(latest).findByText('1 of 2 separate visuals ready')).toBeTruthy();
+    expect(await within(latest).findByText('1 of 2 versions ready')).toBeTruthy();
     expect(within(latest).getByRole('img', { name: 'Portrait ad preview for Version A' })).toBeTruthy();
     expect(within(latest).getAllByText('Generating').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: 'Reload saved jobs' }).closest('details')).toBeNull();
-    await waitFor(() => expect(within(latest).getByText('2 of 2 separate visuals ready')).toBeTruthy(), { timeout: 5_000 });
+    await waitFor(() => expect(within(latest).getByText('2 of 2 versions ready')).toBeTruthy(), { timeout: 5_000 });
     expect(within(latest).getByRole('img', { name: 'Portrait ad preview for Version B' })).toBeTruthy();
     expect(calls.filter((call) => call.url.endsWith('/creative/images'))).toHaveLength(1);
     expect(screen.getByText('Saved creative drafts').closest('details')?.open).toBe(false);
@@ -632,11 +638,11 @@ describe('creative composer', () => {
     installFetch({ jobReads: (readIndex) => readIndex === 0 ? [first] : [second, olderSecond] });
     const view = render(<CreativeComposer campaign={campaign} />);
     const firstLatest = await screen.findByRole('region', { name: 'Latest creative' });
-    expect(await within(firstLatest).findByRole('button', { name: 'View image for Version A' })).toBeTruthy();
+    expect(await within(firstLatest).findByRole('button', { name: 'Inspect original photo for Version A' })).toBeTruthy();
     view.rerender(<CreativeComposer campaign={secondCampaign} />);
     const secondLatest = await screen.findByRole('region', { name: 'Latest creative' });
     expect(within(secondLatest).getByText('Notebook headline one')).toBeTruthy();
-    expect(await within(secondLatest).findByRole('button', { name: 'View image for Version A' })).toBeTruthy();
+    expect(await within(secondLatest).findByRole('button', { name: 'Inspect original photo for Version A' })).toBeTruthy();
     const archive = screen.getByText('Saved creative drafts').closest('details')!;
     expect(archive.open).toBe(false);
     expect(within(archive).queryByText('Notebook headline one')).toBeNull();

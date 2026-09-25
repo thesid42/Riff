@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type KeyboardEvent } from 'react';
 import { LoaderCircle, Pause, Play, Plus, Users, X } from 'lucide-react';
 import type { Campaign } from '../shared/types.js';
 import type { DecisionRecord, WaveSnapshot } from '../shared/run.js';
@@ -81,6 +81,9 @@ export default function PersonaWave({
   const [workFilter, setWorkFilter] = useState('');
   const [query, setQuery] = useState('');
   const [draft, setDraft] = useState<CustomPersonaInput>(emptyDraft);
+  const [setupTab, setSetupTab] = useState<'audience' | 'settings'>('audience');
+  const [editingAudience, setEditingAudience] = useState(false);
+  const [addingPersona, setAddingPersona] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const runtime = wave?.runtime ?? 'idle';
@@ -95,6 +98,10 @@ export default function PersonaWave({
   });
   const selectedIds = profileMix.length ? profileMix : catalog.map((persona) => persona.id);
   const selectedCount = selectedIds.length;
+  const selectedProfileNames = selectedIds.map((id) => catalog.find((persona) => persona.id === id)?.label).filter((label): label is string => Boolean(label));
+  const audienceSummary = selectedCount === catalog.length
+    ? `All ${catalog.length} profiles`
+    : `${selectedProfileNames.slice(0, 2).join(' · ')}${selectedCount > 2 ? ` +${selectedCount - 2}` : ''}`;
   const validHeadlines = isValidHeadlineSet(headlines);
   const hasOverlongHeadline = headlines.some((line) => countHeadlineCharacters(line) > HEADLINE_MAX_LENGTH);
   const waveHasResults = Boolean(wave && (wave.experimentId || wave.progress.total > 0));
@@ -161,6 +168,7 @@ export default function PersonaWave({
       onCampaign(result.campaign);
       setProfileMix((current) => current.length ? [...current, result.persona.id] : []);
       setDraft(emptyDraft);
+      setAddingPersona(false);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'The persona could not be saved.');
     } finally {
@@ -195,6 +203,16 @@ export default function PersonaWave({
     setProfileMix(ids.length === catalog.length ? [] : ids);
   }
 
+  function moveSetupTab(event: KeyboardEvent<HTMLButtonElement>) {
+    if (!['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const next = event.key === 'Home' || event.key === 'ArrowLeft' || event.key === 'ArrowUp'
+      ? 'audience'
+      : 'settings';
+    setSetupTab(next);
+    document.getElementById(next === 'audience' ? 'wave-audience-tab' : 'wave-settings-tab')?.focus();
+  }
+
   return (
     <section className="wave-panel experiment-wave" id="experiment-setup" aria-labelledby="wave-title">
       <div className="wave-heading">
@@ -212,9 +230,8 @@ export default function PersonaWave({
         <div className="experiment-brief-heading">
           <div>
             <span className="section-kicker">NEXT WAVE</span>
-            <h3>Headlines and audience</h3>
+            <h3>Headlines for the next wave</h3>
           </div>
-          <span className="experiment-audience-count">{selectedCount} {selectedCount === 1 ? 'profile' : 'profiles'} · {agentCount} agents</span>
         </div>
         {validHeadlines ? (
           <ol className="experiment-headline-list" aria-label="Headlines for the next wave">
@@ -225,79 +242,69 @@ export default function PersonaWave({
             ? `Shorten headlines to ${HEADLINE_MAX_LENGTH} characters or fewer in Campaign before starting.`
             : `Add 2–3 unique, non-empty headlines of up to ${HEADLINE_MAX_LENGTH} characters in Campaign before starting.`}</p>
         )}
-        <p className="experiment-copy-note">{creativeJobId ? 'Agents inspect the selected image or video with its headline, then simulate skipping, clicking, or signing up.' : 'With no creative selected, agents evaluate headline copy only.'}</p>
-        <div className="wave-visual-note" role="status">
-        {creativeJobId
-          ? <>A saved creative is selected for the next wave. <button type="button" className="text-button" onClick={onClearCreative}>Remove creative</button></>
-          : 'No creative is selected for the next wave.'}
-        </div>
+        <p className="experiment-copy-note" role="status">{creativeJobId
+          ? <>Creative attached: profiles will inspect each saved visual with its headline. <button type="button" className="text-button" onClick={onClearCreative}>Remove creative</button></>
+          : 'Text-only wave: profiles will evaluate headline copy.'}</p>
       </section>
 
-      <div className="experiment-run-row">
-        <div className="wave-actions">
-          {runtime === 'running'
-            ? <button className="button button-secondary" type="button" onClick={() => void pause()} disabled={busy} aria-busy={busy}><Pause size={15} /> Pause</button>
-            : runtime === 'paused'
-              ? <button className="button button-primary" type="button" onClick={() => void resume()} disabled={busy} aria-busy={busy}><Play size={15} /> Resume</button>
-              : <button className="button button-primary" type="button" onClick={() => void start()} disabled={busy || !validHeadlines} aria-busy={busy}>
-                {busy ? <LoaderCircle size={15} className="spin" /> : <Users size={15} />} Start wave
-              </button>}
-        </div>
+      <div className="wave-setup-tabs" role="tablist" aria-label="Wave setup">
+        <button type="button" role="tab" id="wave-audience-tab" tabIndex={setupTab === 'audience' ? 0 : -1} aria-controls="wave-audience-panel" aria-selected={setupTab === 'audience'} onKeyDown={moveSetupTab} onClick={() => setSetupTab('audience')}>
+          Audience <span>{selectedCount} selected</span>
+        </button>
+        <button type="button" role="tab" id="wave-settings-tab" tabIndex={setupTab === 'settings' ? 0 : -1} aria-controls="wave-settings-panel" aria-selected={setupTab === 'settings'} onKeyDown={moveSetupTab} onClick={() => setSetupTab('settings')}>
+          Run settings <span>{agentCount} agents · {concurrency} at once</span>
+        </button>
       </div>
-      {!validHeadlines && <p className="experiment-start-guidance">{hasOverlongHeadline
-        ? `Shorten headlines to ${HEADLINE_MAX_LENGTH} characters or fewer in Campaign before starting.`
-        : `Add 2–3 unique headlines of up to ${HEADLINE_MAX_LENGTH} characters in Campaign before starting.`}</p>}
 
-      <details className="experiment-disclosure">
-        <summary><span>Next wave settings</span><small>{agentCount} agents · {concurrency} concurrent</small></summary>
-        <div className="experiment-settings-grid">
-          <label className="composer-field">
-            <span><b>Agent count</b><small>{MIN_AGENT_COUNT}–{MAX_AGENT_COUNT}</small></span>
-            <input type="number" min={MIN_AGENT_COUNT} max={MAX_AGENT_COUNT} value={agentCount} disabled={runtime === 'running' || busy}
-              onChange={(event) => setAgentCount(Math.max(MIN_AGENT_COUNT, Math.min(MAX_AGENT_COUNT, Number(event.target.value) || DEFAULT_AGENT_COUNT)))} aria-label="Number of persona agents" />
-          </label>
-          <label className="composer-field">
-            <span><b>Concurrency</b><small>1–{MAX_CONCURRENCY}</small></span>
-            <input type="number" min={1} max={MAX_CONCURRENCY} value={concurrency} disabled={runtime === 'running' || busy}
-              onChange={(event) => setConcurrency(Math.max(1, Math.min(MAX_CONCURRENCY, Number(event.target.value) || DEFAULT_CONCURRENCY)))} aria-label="Concurrent persona agents" />
-          </label>
+      <div className="wave-setup-panel" role="tabpanel" id="wave-audience-panel" aria-labelledby="wave-audience-tab" hidden={setupTab !== 'audience'}>
+        <div className="wave-audience-overview">
+          <div>
+            <strong>{audienceSummary}</strong>
+            <p>{selectedCount} profiles selected for the next wave</p>
+          </div>
+          <div className="wave-audience-actions">
+            <button className="button button-secondary" type="button" onClick={() => {
+              const next = !editingAudience;
+              setEditingAudience(next);
+              if (!next) setAddingPersona(false);
+            }} disabled={runtime === 'running' || busy}>{editingAudience ? 'Done' : 'Edit audience'}</button>
+            <button className="text-button" type="button" onClick={() => { setEditingAudience(true); setAddingPersona(true); }} disabled={runtime === 'running' || busy}>
+              <Plus size={14} /> Add custom profile <span>({campaign.customPersonas.length})</span>
+            </button>
+          </div>
         </div>
-      </details>
-
-      <details className="experiment-disclosure audience-disclosure">
-        <summary><span>Choose audience profiles</span><small>{selectedCount} selected · {visible.length} shown</small></summary>
-        <div className="experiment-disclosure-body">
+        {editingAudience && <div className="wave-audience-editor">
           <p className="experiment-helper">Filters and profile selections apply to the next wave only.</p>
           <div className="persona-filters">
             <label className="composer-field"><span><b>Age</b></span>
-              <select value={ageFilter} onChange={(event) => setAgeFilter(event.target.value)} aria-label="Filter by age" disabled={runtime === 'running'}>
+              <select value={ageFilter} onChange={(event) => setAgeFilter(event.target.value)} aria-label="Filter by age" disabled={runtime === 'running' || busy}>
                 <option value="">All ages</option>
                 {AGE_BANDS.map((band) => <option key={band} value={band}>{band}</option>)}
               </select>
             </label>
             <label className="composer-field"><span><b>Country</b></span>
-              <select value={countryFilter} onChange={(event) => setCountryFilter(event.target.value)} aria-label="Filter by country" disabled={runtime === 'running'}>
+              <select value={countryFilter} onChange={(event) => setCountryFilter(event.target.value)} aria-label="Filter by country" disabled={runtime === 'running' || busy}>
                 <option value="">All countries</option>
                 {countries.map((country) => <option key={country} value={country}>{country}</option>)}
               </select>
             </label>
             <label className="composer-field"><span><b>Work</b></span>
-              <select value={workFilter} onChange={(event) => setWorkFilter(event.target.value)} aria-label="Filter by work" disabled={runtime === 'running'}>
+              <select value={workFilter} onChange={(event) => setWorkFilter(event.target.value)} aria-label="Filter by work" disabled={runtime === 'running' || busy}>
                 <option value="">All work types</option>
                 {WORK_TYPES.map((work) => <option key={work} value={work}>{work}</option>)}
               </select>
             </label>
             <label className="composer-field"><span><b>Search</b></span>
-              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Job or city" aria-label="Search personas" disabled={runtime === 'running'} />
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Job or city" aria-label="Search personas" disabled={runtime === 'running' || busy} />
             </label>
           </div>
           <div className="persona-filter-actions">
             <button className="text-button" type="button" onClick={selectVisible} disabled={runtime === 'running' || busy}>Use visible profiles</button>
             <button className="text-button" type="button" onClick={() => setProfileMix([])} disabled={runtime === 'running' || busy}>Use full catalog</button>
+            <span>{selectedCount} selected · {visible.length} shown</span>
           </div>
-
           <fieldset className="profile-mix" disabled={runtime === 'running' || busy}>
-            <legend>Profile mix · {selectedCount} selected</legend>
+            <legend>Audience profiles</legend>
             <div className="profile-mix-list">
               {visible.map((item) => (
                 <label key={item.id}>
@@ -309,14 +316,10 @@ export default function PersonaWave({
             </div>
             {!visible.length && <p className="wave-empty">No profiles match these filters.</p>}
           </fieldset>
-          <p className="experiment-catalog-note">{catalog.length} profiles available, including {PERSONA_TEMPLATES.length} built-in and {campaign.customPersonas.length} custom.</p>
-        </div>
-      </details>
-
-      <details className="experiment-disclosure custom-persona-disclosure">
-        <summary><span>Add a custom persona</span><small>{campaign.customPersonas.length} saved on this campaign</small></summary>
-        <div className="experiment-disclosure-body">
-          <p className="experiment-helper">Saved to this campaign and available in later waves.</p>
+          <p className="experiment-catalog-note">{catalog.length} profiles available · {PERSONA_TEMPLATES.length} built-in · {campaign.customPersonas.length} custom</p>
+        </div>}
+        {addingPersona && <div className="wave-custom-persona-form">
+          <div className="wave-custom-persona-heading"><strong>Add custom profile</strong><span>Saved to this campaign for later waves.</span></div>
           <form className="persona-create" onSubmit={(event) => { event.preventDefault(); void addPersona(); }}>
             <div className="persona-create-grid">
               <label className="composer-field"><span><b>Age</b></span>
@@ -344,13 +347,48 @@ export default function PersonaWave({
                 <select value={draft.household} onChange={(event) => setDraft((current) => ({ ...current, household: event.target.value as CustomPersonaInput['household'] }))} disabled={runtime === 'running' || busy}>{HOUSEHOLDS.map((household) => <option key={household}>{household}</option>)}</select>
               </label>
             </div>
-            <button className="button button-secondary" type="submit" disabled={runtime === 'running' || busy} aria-busy={busy}><Plus size={15} /> Save persona</button>
+            <div className="persona-form-actions">
+              <button className="button button-primary" type="submit" disabled={runtime === 'running' || busy} aria-busy={busy}><Plus size={15} /> Save profile</button>
+              <button className="text-button" type="button" onClick={() => setAddingPersona(false)} disabled={busy}>Cancel</button>
+            </div>
           </form>
         </div>
-      </details>
+        }
+      </div>
+
+      <div className="wave-setup-panel wave-settings-panel" role="tabpanel" id="wave-settings-panel" aria-labelledby="wave-settings-tab" hidden={setupTab !== 'settings'}>
+        <div className="experiment-settings-grid">
+          <label className="composer-field">
+            <span><b>Agent count</b><small>{MIN_AGENT_COUNT}–{MAX_AGENT_COUNT} profiles to simulate</small></span>
+            <input type="number" min={MIN_AGENT_COUNT} max={MAX_AGENT_COUNT} value={agentCount} disabled={runtime === 'running' || busy}
+              onChange={(event) => setAgentCount(Math.max(MIN_AGENT_COUNT, Math.min(MAX_AGENT_COUNT, Number(event.target.value) || DEFAULT_AGENT_COUNT)))} aria-label="Number of persona agents" />
+          </label>
+          <label className="composer-field">
+            <span><b>Concurrency</b><small>Up to {MAX_CONCURRENCY} profiles at once</small></span>
+            <input type="number" min={1} max={MAX_CONCURRENCY} value={concurrency} disabled={runtime === 'running' || busy}
+              onChange={(event) => setConcurrency(Math.max(1, Math.min(MAX_CONCURRENCY, Number(event.target.value) || DEFAULT_CONCURRENCY)))} aria-label="Concurrent persona agents" />
+          </label>
+        </div>
+        <p className="experiment-helper">Higher concurrency finishes sooner and uses more provider capacity at the same time.</p>
+      </div>
+
+      <div className="experiment-run-row">
+        <div className="wave-actions">
+          {runtime === 'running'
+            ? <button className="button button-secondary" type="button" onClick={() => void pause()} disabled={busy} aria-busy={busy}><Pause size={15} /> Pause</button>
+            : runtime === 'paused'
+              ? <button className="button button-primary" type="button" onClick={() => void resume()} disabled={busy} aria-busy={busy}><Play size={15} /> Resume</button>
+              : <button className="button button-primary" type="button" onClick={() => void start()} disabled={busy || !validHeadlines} aria-busy={busy}>
+                {busy ? <LoaderCircle size={15} className="spin" /> : <Users size={15} />} Start wave
+              </button>}
+        </div>
+        {!validHeadlines && <p className="experiment-start-guidance" role="status">{hasOverlongHeadline
+          ? `Shorten headlines to ${HEADLINE_MAX_LENGTH} characters or fewer in Campaign before starting.`
+          : `Add 2–3 unique headlines of up to ${HEADLINE_MAX_LENGTH} characters in Campaign before starting.`}</p>}
+      </div>
 
       {error && <div className="alert alert-error" role="alert"><span>{error}</span></div>}
-      {wave?.lastError && (progress?.failed ?? 0) > 0 && <div className="alert alert-error" role="alert"><span>{progress?.failed} agents failed: {wave.lastError}</span></div>}
+      {wave?.lastError && (progress?.failed ?? 0) > 0 && <div className="alert alert-error" role="alert"><span>{progress?.failed} {progress?.failed === 1 ? 'agent' : 'agents'} failed: {wave.lastError}</span></div>}
       {wave?.ingestError && <div className="alert alert-error" role="alert"><span>Analytics ingest: {wave.ingestError}</span></div>}
       {wave?.reviewError && <div className="alert alert-error" role="alert"><span>Campaign review: {wave.reviewError}</span></div>}
 

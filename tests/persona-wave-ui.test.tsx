@@ -32,6 +32,11 @@ function installApi() {
     if (typeof init.body === 'string') body = JSON.parse(init.body);
     calls.push({ url, method, body });
 
+    if (method === 'POST' && url.endsWith('/personas')) {
+      const input = body as Omit<PersonaTemplate, 'id' | 'custom' | 'label'>;
+      const persona: PersonaTemplate = { ...input, id: 'custom-new', custom: true, label: `${input.job} · ${input.location}` };
+      return jsonResponse({ campaign: fixtureCampaign('campaign-1', [persona]), persona });
+    }
     if (url.endsWith('/run')) return jsonResponse({ wave: fixtureWave({
       runtime: 'running', agentCount: 16, concurrency: 4, experimentId: 'experiment-1', headlines: [...headlines],
       progress: { total: 16, pending: 14, running: 2, succeeded: 0, failed: 0 },
@@ -80,7 +85,7 @@ afterEach(() => {
 });
 
 describe('persona experiment setup', () => {
-  it('keeps the brief and run action visible while optional settings stay closed', async () => {
+  it('keeps the brief and primary action visible with concise flat setup tabs', async () => {
     installApi();
     render(<WaveHarness />);
 
@@ -88,14 +93,14 @@ describe('persona experiment setup', () => {
     expect(screen.getByRole('region', { name: 'Next wave brief' })).toBeTruthy();
     expect(screen.getByText(headlines[0])).toBeTruthy();
     expect(screen.getByText(headlines[1])).toBeTruthy();
-    expect(screen.getByText('Agents inspect the selected image or video with its headline, then simulate skipping, clicking, or signing up.')).toBeTruthy();
-    expect(screen.getByText('A saved creative is selected for the next wave.')).toBeTruthy();
+    expect(screen.getByText(/Creative attached: profiles will inspect each saved visual with its headline\./)).toBeTruthy();
+    expect(screen.queryByText(/No creative is selected/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Start wave' })).toBeTruthy();
     expect(screen.getByRole('button', { name: 'Start wave' }).hasAttribute('disabled')).toBe(false);
-    for (const name of ['Next wave settings', 'Choose audience profiles', 'Add a custom persona']) {
-      expect(screen.getByText(name, { exact: true }).closest('details')?.open).toBe(false);
-    }
-    expect(screen.getByLabelText('Number of persona agents').closest('details')?.open).toBe(false);
+    expect(screen.getByRole('tab', { name: /Audience/ }).getAttribute('aria-selected')).toBe('true');
+    expect(screen.getByRole('tab', { name: /Run settings/ }).getAttribute('aria-selected')).toBe('false');
+    expect(screen.getByRole('tabpanel', { name: /Audience/ }).querySelectorAll('details')).toHaveLength(0);
+    expect(screen.queryByLabelText('Number of persona agents')).toBeNull();
     expect(screen.getByText('No wave run yet')).toBeTruthy();
   });
 
@@ -104,7 +109,7 @@ describe('persona experiment setup', () => {
     const user = userEvent.setup();
     render(<WaveHarness />);
 
-    await user.click(screen.getByText('Next wave settings', { exact: true }));
+    await user.click(screen.getByRole('tab', { name: /Run settings/ }));
     fireEvent.change(screen.getByLabelText('Number of persona agents'), { target: { value: '16' } });
     fireEvent.change(screen.getByLabelText('Concurrent persona agents'), { target: { value: '4' } });
     await user.click(screen.getByRole('button', { name: 'Start wave' }));
@@ -115,8 +120,10 @@ describe('persona experiment setup', () => {
       body: { agentCount: 16, concurrency: 4, headlines, creativeJobId: 'creative-1' },
     });
     expect(await screen.findByRole('button', { name: 'Pause' })).toBeTruthy();
-    expect(screen.getByText(/Headlines and audience/)).toBeTruthy();
+    expect(screen.getByText(/Headlines for the next wave/)).toBeTruthy();
     expect(screen.getByText('0 of 16 agents complete')).toBeTruthy();
+    await user.click(screen.getByRole('tab', { name: /Run settings/ }));
+    expect((screen.getByLabelText('Number of persona agents') as HTMLInputElement).disabled).toBe(true);
 
     await user.click(screen.getByRole('button', { name: 'Pause' }));
     expect(await screen.findByRole('button', { name: 'Resume' })).toBeTruthy();
@@ -126,6 +133,20 @@ describe('persona experiment setup', () => {
     expect(calls.map((call) => call.url)).toEqual([
       '/api/campaigns/campaign-1/run', '/api/campaigns/campaign-1/pause', '/api/campaigns/campaign-1/resume',
     ]);
+  });
+
+  it('moves between setup tabs with arrow and Home keys', async () => {
+    installApi();
+    render(<WaveHarness />);
+    const audience = screen.getByRole('tab', { name: /Audience/ });
+    const settings = screen.getByRole('tab', { name: /Run settings/ });
+
+    fireEvent.keyDown(audience, { key: 'ArrowRight' });
+    expect(settings.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(settings);
+    fireEvent.keyDown(settings, { key: 'Home' });
+    expect(audience.getAttribute('aria-selected')).toBe('true');
+    expect(document.activeElement).toBe(audience);
   });
 
   it('shows saved wave progress without mislabeling its mutable headlines or an older review', () => {
@@ -155,19 +176,41 @@ describe('persona experiment setup', () => {
     expect(screen.getByText('Detailed results', { exact: true }).closest('details')?.open).toBe(false);
   });
 
-  it('keeps audience selection inside its disclosure and resets it when the keyed campaign changes', async () => {
+  it('edits the audience in one flat panel and resets it when the keyed campaign changes', async () => {
     installApi();
     const user = userEvent.setup();
     render(<WaveHarness />);
 
-    expect(screen.getByText('Choose audience profiles', { exact: true }).closest('details')?.open).toBe(false);
-    await user.click(screen.getByText('Choose audience profiles', { exact: true }));
+    expect(screen.getByRole('button', { name: 'Edit audience' })).toBeTruthy();
+    expect(screen.queryByLabelText('Filter by age')).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'Edit audience' }));
     const checkbox = screen.getAllByRole('checkbox')[0];
     await user.click(checkbox);
-    expect(screen.getByText(new RegExp(`${PERSONA_TEMPLATES.length - 1} profiles · 40 agents`))).toBeTruthy();
+    expect(screen.getByRole('tab', { name: /Audience/ }).textContent).toContain(`${PERSONA_TEMPLATES.length - 1} selected`);
 
     await user.click(screen.getByRole('button', { name: 'Switch campaign' }));
-    expect(screen.getByText(new RegExp(`${PERSONA_TEMPLATES.length + 1} profiles · 40 agents`))).toBeTruthy();
-    expect(screen.getByText('Choose audience profiles', { exact: true }).closest('details')?.open).toBe(false);
+    expect(screen.getByRole('tab', { name: /Audience/ }).textContent).toContain(`${PERSONA_TEMPLATES.length + 1} selected`);
+    expect(screen.getByRole('button', { name: 'Edit audience' })).toBeTruthy();
+    expect(screen.queryByLabelText('Filter by age')).toBeNull();
+  });
+
+  it('adds a custom profile inline without nesting an accordion', async () => {
+    installApi();
+    const user = userEvent.setup();
+    render(<WaveHarness />);
+
+    await user.click(screen.getByRole('button', { name: /Add custom profile/ }));
+    const panel = screen.getByRole('tabpanel', { name: 'Audience' });
+    expect(panel.querySelectorAll('details')).toHaveLength(0);
+    await user.type(screen.getByPlaceholderText('pharmacist'), 'architect');
+    await user.type(screen.getByPlaceholderText('India'), 'Canada');
+    await user.type(screen.getByPlaceholderText('Pune'), 'Toronto');
+    await user.click(screen.getByRole('button', { name: 'Save profile' }));
+
+    expect(await screen.findByRole('button', { name: /Add custom profile \(1\)/ })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Done' }));
+    await user.click(screen.getByRole('button', { name: 'Edit audience' }));
+    expect(screen.getByLabelText('Filter by age')).toBeTruthy();
+    expect(screen.getByText(/architect · Toronto · custom/)).toBeTruthy();
   });
 });

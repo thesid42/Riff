@@ -37,6 +37,9 @@ describe('experiment results', () => {
     await user.click(screen.getByText('Previous experiments'));
     const oldCard = (await screen.findByRole('heading', { name: 'Saved old-a headline' })).closest('article')!;
     expect(within(oldCard).queryByText('Sign-ups')).toBeNull();
+    expect(within(oldCard).getByText('Compare two headlines')).toBeTruthy();
+    expect(oldCard.querySelector('details')).toBeNull();
+    expect(history?.querySelectorAll('details')).toHaveLength(0);
   });
 
   it('does not show old metrics for a newly started wave that has not loaded yet', () => {
