@@ -377,16 +377,11 @@ export default function App() {
                 details={details?.campaign.id === selectedId ? details : null}
                 metrics={metrics?.campaignId === selectedId ? metrics : null}
                 rounds={rounds.filter((entry) => entry.experiment.campaignId === selectedId)}
-                listLoading={listLoading}
-                listError={listError}
-                detailsLoading={detailsLoading}
                 metricsLoading={metricsLoading}
                 detailsError={detailsError}
                 metricsError={metricsError}
                 onRetry={retryCampaign}
                 onShowMetrics={() => setDrawer('metrics')}
-                onCreate={() => { setSaveError(''); setDialogOpen(true); }}
-                onRetryList={() => setListRetry((count) => count + 1)}
                 onOpenExperiments={() => setView('Experiments')}
                 initialHeadlines={hasComposerDraft || isStoredHeadlineSet(composerHeadlines) ? composerHeadlines : undefined}
                 onHeadlinesChange={(headlines) => activeCampaign && updateComposerHeadlines(activeCampaign.id, headlines)}
@@ -453,23 +448,18 @@ function LoadingState({ label }: { label: string }) {
 }
 
 function CampaignDashboard({
-  campaign, details, metrics, rounds, listLoading, listError, detailsLoading, metricsLoading, detailsError, metricsError, onRetry, onShowMetrics, onCreate, onRetryList,
+  campaign, details, metrics, rounds, metricsLoading, detailsError, metricsError, onRetry, onShowMetrics,
   onOpenExperiments, initialHeadlines, onHeadlinesChange, selectedCreativeJobId, onUseForExperiment, pendingLesson,
 }: {
   campaign: Campaign | null;
   details: CampaignDetails | null;
   metrics: MetricsSnapshot | null;
   rounds: RoundMetrics[];
-  listLoading: boolean;
-  listError: string;
-  detailsLoading: boolean;
   metricsLoading: boolean;
   detailsError: string;
   metricsError: string;
   onRetry: () => void;
   onShowMetrics: () => void;
-  onCreate: () => void;
-  onRetryList: () => void;
   onOpenExperiments: () => void;
   initialHeadlines?: string[];
   onHeadlinesChange: (headlines: string[]) => void;
@@ -501,32 +491,13 @@ function CampaignDashboard({
           <button type="button" className="all-metrics-link" onClick={onShowMetrics}>All metrics <ArrowRight size={16} /></button>
       </section>
 
-      <div className="insight-grid">
-        <section className="panel chart-panel chart-panel-explained" aria-labelledby="chart-title">
-          <div className="panel-heading">
-            <div><span className="section-kicker">LOCAL PERSONA SIMULATION</span><h2 id="chart-title">Cumulative simulated sign-ups</h2><p>Each step adds a recorded sign-up from a simulated audience profile. Versions are compared over the same wave timeline.</p></div>
-          </div>
-          <SignupChart metrics={metrics} variants={variants} loading={metricsLoading} />
-          <div className="chart-footnote"><span>{metrics?.window.label ?? 'Latest persona wave'}</span><span>Metrics source: {metrics?.source && metrics.source !== 'none' ? humanizeStatus(metrics.source) : 'not available'}</span></div>
-        </section>
-
-
-        <section className="next-panel" aria-labelledby="next-title">
-          <div className="next-topline"><span className="next-icon"><Sprout size={19} /></span><span className="section-kicker">CAMPAIGN STATUS</span></div>
-          <h2 id="next-title">{listLoading ? 'Checking saved campaigns…' : listError ? 'Campaigns could not be loaded.' : campaign ? 'Your campaign draft is saved.' : 'Start with a campaign brief.'}</h2>
-          <p>{listError ? 'Retry the campaign list before creating a new draft, so existing work stays easy to find.' : campaign ? metrics?.status === 'available' ? 'Your latest experiment results are shown alongside this brief. Compare the headline versions using the simulated sign-up counts and time axis.' : 'The product, audience, approved claims, and budget are saved. Results will appear when campaign activity is available.' : listLoading ? 'The workspace is checking for drafts saved on this device.' : 'Add a product, audience, approved claims, and demo budget to create a draft.'}</p>
-          <div className="next-divider" />
-          {listError ? <button type="button" className="button button-secondary" onClick={onRetryList}>Retry campaign list <ArrowRight size={15} /></button> : campaign ? <div className="next-bottom"><span className="status-pill"><span className="status-dot" /> Draft</span><span>{details?.wave?.runtime === 'running' ? 'Campaign agent running' : details?.wave?.loopActive || details?.wave?.loopContinuing ? 'Improving toward the target' : detailsLoading ? 'Loading campaign' : details?.wave?.progress.total ? `${details.wave.progress.succeeded} judged` : 'No activity started'}</span></div> : <button type="button" className="button button-primary" onClick={onCreate} disabled={listLoading}><Plus size={16} /> Create campaign draft</button>}
-          {details?.wave?.loopStatus && (
-            <p className={`loop-status loop-${details.wave.loopStatus.reason}`} role="status">
-              {details.wave.loopStatus.message}
-              {details.wave.loopStatus.bestClickRate != null && ` Best click rate ${percent(details.wave.loopStatus.bestClickRate)} against a ${percent(details.wave.loopStatus.threshold)} threshold, measured from ${humanizeStatus(details.wave.loopStatus.metricsSource)}.`}
-              {details.wave.loopStatus.creativeNote && ` ${details.wave.loopStatus.creativeNote}`}
-            </p>
-          )}
-          {metrics?.message && <p className="source-message">{metrics.message}</p>}
-        </section>
-      </div>
+      <section className="panel chart-panel chart-panel-explained" aria-labelledby="chart-title">
+        <div className="panel-heading">
+          <div><span className="section-kicker">EXPERIMENT COMPARISON</span><h2 id="chart-title">Version performance</h2><p>Grouped bars for ad views, clicks, and sign-ups by headline version.</p></div>
+        </div>
+        <SignupChart metrics={metrics} variants={variants} loading={metricsLoading} />
+        <div className="chart-footnote"><span>{metrics?.window.label ?? 'Latest persona wave'}</span><span>Metrics source: {metrics?.source && metrics.source !== 'none' ? humanizeStatus(metrics.source) : 'not available'}</span></div>
+      </section>
 
       {rounds.length > 1 && <details className="experiment-history round-history">
         <summary><span>Results by round <span className="experiment-history-count">{rounds.length} rounds</span></span><ChevronDown size={17} /></summary>
