@@ -1,4 +1,4 @@
-import { personaById } from '../shared/personas.js';
+import { personaById, type PersonaTemplate } from '../shared/personas.js';
 import {
   average,
   median,
@@ -65,7 +65,7 @@ export function signupSeries(jobs: AgentJob[]): Array<{ timestamp: string; varia
   return points;
 }
 
-export function segmentMetrics(jobs: AgentJob[]): PersonaSegmentMetrics[] {
+export function segmentMetrics(jobs: AgentJob[], extras: PersonaTemplate[] = []): PersonaSegmentMetrics[] {
   const bySegment = new Map<string, AgentJob[]>();
   for (const job of jobs.filter((item) => item.status === 'succeeded')) {
     const list = bySegment.get(job.audienceSegment) ?? [];
@@ -88,7 +88,7 @@ export function segmentMetrics(jobs: AgentJob[]): PersonaSegmentMetrics[] {
     const topFriction = [...frictionCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
     return {
       segment,
-      label: personaById(segment)?.label ?? segment,
+      label: personaById(segment, extras)?.label ?? segment,
       sampleSize: list.length,
       views: list.length,
       skips: list.filter((job) => job.action === 'skip').length,

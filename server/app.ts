@@ -6,6 +6,7 @@ import {
   type IntegrationStatus,
 } from '../shared/types.js';
 import { persistHeadlinesSchema, runWaveSchema } from '../shared/run.js';
+import { createCustomPersona, customPersonaSchema } from '../shared/personas.js';
 import { creativeImageRequestSchema, creativeVideoRequestSchema } from '../shared/creative.js';
 import { CampaignDatabase } from './database.js';
 import { createProviders, getIntegrationStatuses, type Providers } from './providers/index.js';
@@ -130,6 +131,30 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     if (!campaign) return notFound(reply, 'Campaign');
     try { return { campaign: runner.persistHeadlines(campaign, parsed.data.headlines) }; }
     catch (error) { return sendRunError(reply, error); }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/personas', async (request, reply) => {
+    const parsed = customPersonaSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'validation_error', message: 'Persona details are invalid.' } });
+    }
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    if (campaign.customPersonas.length >= 24) {
+      return reply.code(400).send({ error: { code: 'persona_limit', message: 'This draft already has 24 custom personas.' } });
+    }
+    const added = createCustomPersona(parsed.data, randomUUID());
+    const next = database.setCustomPersonas(campaign.id, [...campaign.customPersonas, added], new Date().toISOString());
+    return { campaign: next, persona: added };
+  });
+
+  app.post<{ Params: { id: string; personaId: string } }>('/api/campaigns/:id/personas/:personaId/delete', async (request, reply) => {
+    if (!isEmptyObject(request.body)) return reply.code(400).send({ error: { code: 'validation_error', message: 'The delete request must be an empty JSON object.' } });
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    const next = campaign.customPersonas.filter((persona) => persona.id !== request.params.personaId);
+    if (next.length === campaign.customPersonas.length) return notFound(reply, 'Persona');
+    return { campaign: database.setCustomPersonas(campaign.id, next, new Date().toISOString()) };
   });
 
   app.post<{ Params: { id: string } }>('/api/campaigns/:id/run', async (request, reply) => {

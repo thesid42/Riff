@@ -213,12 +213,19 @@ export class CampaignDatabase {
         PRAGMA user_version = 4;
       `);
     }
+    const afterRun = this.#database.prepare('PRAGMA user_version').get() as { user_version: number };
+    if (afterRun.user_version < 5) {
+      this.#database.exec(`
+        ALTER TABLE campaigns ADD COLUMN custom_personas TEXT NOT NULL DEFAULT '[]';
+        PRAGMA user_version = 5;
+      `);
+    }
   }
 
   listCampaigns(): Campaign[] {
     const rows = this.#database.prepare(`
       SELECT id, name, product, audience, goal, approved_claims, budget_cents,
-             currency, status, runtime, agent_count, concurrency, headlines, created_at, updated_at
+             currency, status, runtime, agent_count, concurrency, headlines, custom_personas, created_at, updated_at
       FROM campaigns ORDER BY created_at DESC, id DESC
     `).all() as unknown as CampaignRow[];
     return rows.map(toCampaign);
@@ -227,7 +234,7 @@ export class CampaignDatabase {
   getCampaign(id: string): Campaign | undefined {
     const row = this.#database.prepare(`
       SELECT id, name, product, audience, goal, approved_claims, budget_cents,
-             currency, status, runtime, agent_count, concurrency, headlines, created_at, updated_at
+             currency, status, runtime, agent_count, concurrency, headlines, custom_personas, created_at, updated_at
       FROM campaigns WHERE id = ?
     `).get(id) as unknown as CampaignRow | undefined;
     return row ? toCampaign(row) : undefined;
@@ -237,8 +244,8 @@ export class CampaignDatabase {
     const data = input;
     this.#database.prepare(`
       INSERT INTO campaigns
-        (id, name, product, audience, goal, approved_claims, budget_cents, currency, status, runtime, agent_count, concurrency, headlines, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'idle', ?, ?, '[]', ?, ?)
+        (id, name, product, audience, goal, approved_claims, budget_cents, currency, status, runtime, agent_count, concurrency, headlines, custom_personas, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft', 'idle', ?, ?, '[]', '[]', ?, ?)
     `).run(id, data.name, data.product, data.audience, data.goal, JSON.stringify(data.approvedClaims), data.budgetCents, data.currency, DEFAULT_AGENT_COUNT, DEFAULT_CONCURRENCY, now, now);
     return this.getCampaign(id)!;
   }
@@ -311,6 +318,12 @@ export class CampaignDatabase {
       SET status = 'uncertain', error = 'Generation was interrupted by a server restart. Review provider status before starting another job.', updated_at = ?
       WHERE status IN ('submitting', 'generating')
     `).run(now);
+  }
+
+  setCustomPersonas(campaignId: string, personas: Campaign['customPersonas'], now: string): Campaign | undefined {
+    this.#database.prepare('UPDATE campaigns SET custom_personas = ?, updated_at = ? WHERE id = ?')
+      .run(JSON.stringify(personas), now, campaignId);
+    return this.getCampaign(campaignId);
   }
 
   setHeadlines(campaignId: string, headlines: string[], now: string): Campaign | undefined {
@@ -533,6 +546,7 @@ interface CampaignRow {
   agent_count: number;
   concurrency: number;
   headlines: string;
+  custom_personas: string;
   created_at: string;
   updated_at: string;
 }
@@ -651,6 +665,7 @@ function toCampaign(row: CampaignRow): Campaign {
     agentCount: row.agent_count ?? DEFAULT_AGENT_COUNT,
     concurrency: row.concurrency ?? DEFAULT_CONCURRENCY,
     headlines: JSON.parse(row.headlines || '[]') as string[],
+    customPersonas: JSON.parse(row.custom_personas || '[]') as Campaign['customPersonas'],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

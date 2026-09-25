@@ -47,7 +47,7 @@ export class ExperimentRunService {
       headlines: campaign.headlines,
       experimentId: experiment?.id ?? null,
       progress: jobProgress(jobs),
-      segments: segmentMetrics(jobs),
+      segments: segmentMetrics(jobs, campaign.customPersonas),
       deciderSpeed: deciderSpeed(jobs),
       latestDecision: this.options.database.latestDecision(campaign.id) ?? null,
       lastError: lastJobError(jobs),
@@ -137,6 +137,7 @@ export class ExperimentRunService {
       agentCount: input.agentCount,
       variantIds: variants.map((variant) => variant.id),
       personaIds: input.profileMix,
+      extras: campaign.customPersonas,
     });
     this.options.database.enqueueAgentJobs(assignments.map((assignment) => ({
       id: randomUUID(),
@@ -278,7 +279,7 @@ export class ExperimentRunService {
   private async judge(job: AgentJob) {
     const campaign = this.options.database.getCampaign(job.campaignId);
     const variant = this.options.database.getVariant(job.variantId);
-    const persona = personaById(job.personaId);
+    const persona = personaById(job.personaId, campaign?.customPersonas);
     if (!campaign || !variant || !persona || !this.options.liquid) throw new RunServiceError(500, 'job_missing', 'The persona job lost its campaign context.');
     const siblings = this.options.database.listExperimentVariants(job.experimentId)
       .map((item) => item.headline)
@@ -319,7 +320,7 @@ export class ExperimentRunService {
     this.options.database.setRuntime(campaignId, 'idle', campaign.agentCount, campaign.concurrency, now);
     if (!this.options.liquid || succeeded === 0) return;
     this.reviewErrors.delete(campaignId);
-    const segments = segmentMetrics(jobs);
+    const segments = segmentMetrics(jobs, campaign.customPersonas);
     const evidence = segments.map((segment, index) => ({
       id: `SEG-${String(index + 1).padStart(2, '0')}`,
       summary: `${segment.label}: ${segment.signups}/${segment.views} sign-ups, median decide ${segment.medianDecideMs ?? '—'} ms, confidence ${segment.averageConfidence == null ? '—' : segment.averageConfidence.toFixed(2)}, friction ${segment.topFriction ?? 'none'}.`,

@@ -11,7 +11,7 @@ function fixtureCampaign(overrides: Partial<Campaign> = {}): Campaign {
   return {
     id: 'campaign-1', name: 'Weekend refill', product: 'Reusable bottle', audience: 'People who commute',
     goal: 'signups', approvedClaims: ['Made for repeat use'], budgetCents: 25000, currency: 'USD', status: 'draft',
-    runtime: 'idle', agentCount: 40, concurrency: 8, headlines: [],
+    runtime: 'idle', agentCount: 40, concurrency: 8, headlines: [], customPersonas: [],
     createdAt, updatedAt: createdAt, ...overrides,
   };
 }

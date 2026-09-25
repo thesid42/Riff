@@ -169,6 +169,22 @@ describe('persona wave', () => {
     expect(liquid.proposeExperimentWithMetadata).not.toHaveBeenCalled();
   });
 
+  it('saves a custom persona on the draft', async () => {
+    const created = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Bottle', product: 'Bottle', audience: 'Commuters', approvedClaims: ['750 ml'], budgetCents: 5000 },
+    });
+    const id = created.json().campaign.id as string;
+    const added = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/personas`,
+      payload: { ageBand: '25-34', work: 'specialist', job: 'dentist', country: 'Spain', location: 'Madrid', language: 'Spanish', device: 'phone', household: 'partner' },
+    });
+    expect(added.statusCode).toBe(200);
+    expect(added.json().persona.custom).toBe(true);
+    expect(added.json().campaign.customPersonas).toHaveLength(1);
+    expect(added.json().campaign.customPersonas[0].location).toBe('Madrid');
+  });
+
   it('refuses a wave when Liquid or analytics is missing', async () => {
     await app.close();
     app = createApp({ databasePath: join(directory, 'campaigns.sqlite'), providers: { videoEnabled: false } });
