@@ -145,7 +145,7 @@ export class ExperimentRunService {
       phase: next.phase,
       title: next.title,
       detail: next.detail,
-      round: next.round ?? prior?.round ?? (this.options.database.listExperiments(campaignId).length || 1),
+      round: next.round ?? prior?.round ?? this.currentLoopRound(campaignId),
       event: next.event !== undefined ? next.event : prior?.event ?? null,
     });
   }
@@ -154,7 +154,7 @@ export class ExperimentRunService {
     const stored = this.loopActivities.get(campaign.id);
     const live = campaign.runtime === 'running' || this.pendingRounds.has(campaign.id) || this.preparing.has(campaign.id) || this.options.database.isLoopActive(campaign.id);
     if (!live) return null;
-    const round = stored?.round || this.options.database.listExperiments(campaign.id).length || 1;
+    const round = stored?.round || this.currentLoopRound(campaign.id);
     const event = stored?.event ?? this.creativeNotes.get(campaign.id) ?? null;
     const progress = jobProgress(jobs);
     if (this.preparing.has(campaign.id) || this.pendingRounds.has(campaign.id)) {
@@ -190,6 +190,13 @@ export class ExperimentRunService {
 
   private loopMaxRounds(campaign: Campaign): number {
     return campaign.maxAutoRounds ?? this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS;
+  }
+
+  /** Round within the current loop, not the campaign's lifetime experiment count. */
+  private currentLoopRound(campaignId: string): number {
+    const total = this.options.database.listExperiments(campaignId).length;
+    const origin = this.options.database.getLoopOrigin(campaignId);
+    return Math.max(1, total - origin);
   }
 
   details(campaign: Campaign): {
@@ -346,6 +353,7 @@ export class ExperimentRunService {
     }
     this.options.database.setLoopActive(campaign.id, true, new Date().toISOString());
     if (!round.chained) {
+      this.options.database.setLoopOrigin(campaign.id, this.options.database.listExperiments(campaign.id).length, new Date().toISOString());
       this.creativeNotes.delete(campaign.id);
       this.loopActivities.delete(campaign.id);
       this.cancelPreparing(campaign.id);
@@ -420,7 +428,7 @@ export class ExperimentRunService {
       phase: 'judging',
       title: 'Judging this wave',
       detail: `${input.agentCount} personas are inspecting the ad.`,
-      round: this.options.database.listExperiments(campaign.id).length,
+      round: this.currentLoopRound(campaign.id),
       event: round.chained ? undefined : null,
     });
     this.pump(campaign.id, input.concurrency);
@@ -440,7 +448,7 @@ export class ExperimentRunService {
     this.loopActivities.delete(campaign.id);
     this.loopStatuses.set(campaign.id, {
       reason: 'paused',
-      round: this.options.database.listExperiments(campaign.id).length,
+      round: this.currentLoopRound(campaign.id),
       maxRounds: this.loopMaxRounds(campaign),
       message: 'The campaign agent was paused, so automatic improvement stopped.',
       bestClickRate: null,
@@ -639,7 +647,7 @@ export class ExperimentRunService {
 
     // Step 5 feeding step 6: judge the round against the configured success threshold using the
     // same metrics the dashboard shows, and record which source decided it.
-    const round = this.options.database.listExperiments(campaignId).length;
+    const round = this.currentLoopRound(campaignId);
     const maxRounds = this.loopMaxRounds(campaign);
     const threshold = this.loopThreshold(campaign);
     const measured = await this.metricsForExperiment(campaign, { ...experiment, windowEnd: experiment.windowEnd ?? now });
@@ -770,33 +778,42 @@ export class ExperimentRunService {
       // Step 2: check the proposal against the brief's claims, the budget and the test rules
       // before anything is applied. A failure leaves the tested headlines in place.
       const spend = await this.spendSoFar(campaign);
-      const violation = checkRules(campaign, proposed.headlines, spend, campaign.agentCount);
-      if (violation) {
-        stop('rules_failed', violation);
+      const overBudget = budgetViolation(campaign, spend, campaign.agentCount);
+      if (overBudget) {
+        stop('rules_failed', overBudget);
         return;
       }
-      this.options.database.setHeadlines(campaignId, proposed.headlines, decision.createdAt);
+      const headlineViolation = headlineRuleViolation(proposed.headlines, campaign.approvedClaims);
+      if (!headlineViolation) {
+        this.options.database.setHeadlines(campaignId, proposed.headlines, decision.createdAt);
+      }
       if (atRoundCap(round, maxRounds)) {
         stop('round_cap', `The loop reached its limit of ${maxRounds} rounds. Start another wave manually to continue.`);
         return;
       }
+      const keepHeadlines = Boolean(headlineViolation);
+      const needsNewCreative = proposed.needsNewCreative || keepHeadlines;
       this.loopStatuses.delete(campaignId);
       this.setLoopActivity(campaignId, {
         phase: 'starting',
-        title: proposed.needsNewCreative ? 'Improving the next image' : 'Planning the next test',
-        detail: proposed.needsNewCreative
-          ? 'The next round will generate a new image from a short visual change, not the raw lesson text.'
-          : 'The next round will keep the current image and try new wording.',
-        event: proposed.needsNewCreative
-          ? 'Next: generate a new image from the lesson.'
-          : 'Next: keep the current image and test new headlines.',
+        title: needsNewCreative ? 'Improving the next image' : 'Planning the next test',
+        detail: keepHeadlines
+          ? 'The proposed headlines broke a claim rule, so this round keeps the current copy and tries a new image.'
+          : needsNewCreative
+            ? 'The next round will generate a new image from a short visual change, not the raw lesson text.'
+            : 'The next round will keep the current image and try new wording.',
+        event: keepHeadlines
+          ? `${headlineViolation} Kept the current headlines and continuing.`
+          : needsNewCreative
+            ? 'Next: generate a new image from the lesson.'
+            : 'Next: keep the current image and test new headlines.',
       });
       this.scheduleNextRound(campaignId, round, {
         kind: 'test',
         decisionId: decision.id,
         hypothesis: proposed.hypothesis,
         personaIds: proposed.personaIds,
-        needsNewCreative: proposed.needsNewCreative,
+        needsNewCreative,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Campaign review failed.';
@@ -869,7 +886,7 @@ export class ExperimentRunService {
     const measured = await this.metricsForExperiment(campaign, experiment);
     const threshold = this.loopThreshold(campaign);
     const maxRounds = this.loopMaxRounds(campaign);
-    const round = this.options.database.listExperiments(campaignId).length;
+    const round = this.currentLoopRound(campaignId);
     if (atRoundCap(round, maxRounds)) {
       this.options.database.setLoopActive(campaignId, false, new Date().toISOString());
       this.loopActivities.delete(campaignId);
@@ -890,7 +907,7 @@ export class ExperimentRunService {
       this.loopActivities.delete(campaignId);
       this.loopStatuses.set(campaignId, {
         reason: 'threshold_met',
-        round: this.options.database.listExperiments(campaignId).length,
+        round: this.currentLoopRound(campaignId),
         maxRounds: this.loopMaxRounds(campaign),
         message: `A variant reached a ${(bestClickRate * 100).toFixed(1)}% click rate, meeting the ${(threshold * 100).toFixed(1)}% threshold, so the loop stopped.`,
         bestClickRate,
@@ -906,7 +923,7 @@ export class ExperimentRunService {
         ?? fallbackLessonStatement(campaign.headlines, segmentMetrics(jobs, campaign.customPersonas), bestClickRate),
       [],
     );
-    this.scheduleNextRound(campaignId, this.options.database.listExperiments(campaignId).length, {
+    this.scheduleNextRound(campaignId, this.currentLoopRound(campaignId), {
       kind: 'test',
       decisionId: fallback.id,
       hypothesis: fallback.hypothesis,
@@ -1033,7 +1050,7 @@ export class ExperimentRunService {
           phase: 'starting',
           title: 'Starting the next wave',
           detail: 'Personas will now inspect the latest headlines and visual.',
-          round: this.options.database.listExperiments(campaignId).length + 1,
+          round: this.currentLoopRound(campaignId) + 1,
           event,
         });
       }
@@ -1193,12 +1210,16 @@ const CLAIM_WORDS = [
  * floor, not a reading of intent: numbers and claim words in a headline must appear in the
  * approved claims.
  */
-export function checkRules(campaign: Pick<Campaign, 'approvedClaims' | 'budgetCents'>, headlines: string[], spentCents: number, agentCount: number): string | null {
+export function headlineRuleViolation(headlines: string[], approvedClaims: string[]): string | null {
   const parsed = headlineSetSchema.safeParse(headlines);
   if (!parsed.success) return 'The proposed test did not have 2 or 3 unique headlines, so it was not applied.';
-  const unapproved = unapprovedClaims(parsed.data, campaign.approvedClaims);
+  const unapproved = unapprovedClaims(parsed.data, approvedClaims);
   if (unapproved) return `The headline "${unapproved.headline}" asserts "${unapproved.term}", which is not in the approved claims, so the proposal was not applied.`;
-  return budgetViolation(campaign, spentCents, agentCount);
+  return null;
+}
+
+export function checkRules(campaign: Pick<Campaign, 'approvedClaims' | 'budgetCents'>, headlines: string[], spentCents: number, agentCount: number): string | null {
+  return headlineRuleViolation(headlines, campaign.approvedClaims) ?? budgetViolation(campaign, spentCents, agentCount);
 }
 
 /** A round may start only if its worst-case spend still fits inside the campaign budget. */

@@ -21,9 +21,9 @@ export function calibrateHumanJudgment(input: HumanDecisionInput): PersonaJudgme
   const friction = frictionForAction(action, input.judgment.friction, priors, scored);
   return {
     action,
-    reason: reasonForAction(action, friction, input.judgment.reason),
-    dwellSeconds: dwellForAction(action, input.judgment.dwellSeconds, `${input.seed}:dwell`),
-    timeToActionSeconds: timeToActionForAction(action, input.judgment.timeToActionSeconds, `${input.seed}:tta`),
+    reason: reasonForAction(action, friction, input.judgment.reason, input.persona),
+    dwellSeconds: dwellForAction(action, input.judgment.dwellSeconds, `${input.seed}:dwell`, input.persona.device),
+    timeToActionSeconds: timeToActionForAction(action, input.judgment.timeToActionSeconds, `${input.seed}:tta`, input.persona.device),
     confidence: clampUnit(scored.confidence),
     attention: clampUnit(scored.attention),
     clarity: clampUnit(scored.clarity),
@@ -78,16 +78,16 @@ function repairScores(judgment: PersonaJudgment, seed: string) {
 }
 
 function decideAction(scores: ReturnType<typeof repairScores>, priors: PersonaPriors, friction: PersonaFriction, seed: string): PersonaAction {
-  let clickLogit = -1.35;
-  clickLogit += 1.55 * scores.attention;
-  clickLogit += 0.8 * scores.clarity;
-  clickLogit += 0.6 * scores.purchaseIntent;
-  clickLogit -= 0.55 * priors.busyness;
-  clickLogit -= 0.25 * priors.skepticism;
-  clickLogit += frictionPenalty(friction, { busy: -0.4, relevance: -0.5, price: -0.15, trust: -0.25, none: 0.28 });
+  let clickLogit = -1.48;
+  clickLogit += 1.45 * scores.attention;
+  clickLogit += 0.7 * scores.clarity;
+  clickLogit += 0.55 * scores.purchaseIntent;
+  clickLogit -= 0.65 * priors.busyness;
+  clickLogit -= 0.32 * priors.skepticism;
+  clickLogit += frictionPenalty(friction, { busy: -0.45, relevance: -0.55, price: -0.22, trust: -0.3, none: 0.2 });
   if (hash01(`${seed}:click`) >= sigmoid(clickLogit)) return 'skip';
 
-  let signupLogit = -1.5;
+  let signupLogit = -1.72;
   signupLogit += 1.55 * scores.purchaseIntent;
   signupLogit += 1.15 * scores.trust;
   signupLogit -= 0.6 * priors.priceSensitivity;
@@ -132,32 +132,42 @@ function noticedForMedia(noticed: NoticedFirst, mediaType: HumanDecisionInput['m
   return 'headline';
 }
 
-function reasonForAction(action: PersonaAction, friction: PersonaFriction, reason: string): string {
-  const briefMatch = /matches the described|join the waitlist|sign up for the waitlist|product matches/i.test(reason);
-  if (action === 'skip' && briefMatch) {
-    if (friction === 'price') return 'I would keep scrolling; the ad does not make the cost feel worth it.';
-    if (friction === 'trust') return 'I would keep scrolling; there is not enough proof to trust this yet.';
-    if (friction === 'relevance') return 'I would keep scrolling; this does not feel meant for me.';
-    if (friction === 'busy') return 'I would keep scrolling; I am moving too fast to stop for this.';
-    return 'I would keep scrolling; the ad did not create enough intent to act.';
+function reasonForAction(action: PersonaAction, friction: PersonaFriction, reason: string, persona: PersonaTemplate): string {
+  if (looksLivedIn(reason)) return reason.trim();
+  const device = persona.device === 'phone' ? 'on my phone' : 'at my desk';
+  const role = persona.job === 'not working' ? `in ${persona.location}` : `as a ${persona.job} in ${persona.location}`;
+  if (action === 'skip') {
+    if (friction === 'price') return `Scrolling ${device} ${role}, I would keep going — the value is not clear enough for my budget.`;
+    if (friction === 'trust') return `Scrolling ${device} ${role}, I would keep going — I do not have enough proof to trust this yet.`;
+    if (friction === 'relevance') return `Scrolling ${device} ${role}, I would keep going — this does not feel meant for someone like me.`;
+    if (friction === 'busy') return `Scrolling ${device} ${role}, I am moving too fast to stop for this.`;
+    return `Scrolling ${device} ${role}, the ad did not make me want to stop.`;
   }
-  if (action === 'click' && briefMatch) return 'I would open the ad to check the details, not sign up yet.';
-  if (action === 'signup' && briefMatch) return 'I would join the waitlist; the ad felt clear and useful enough to act now.';
-  return reason;
+  if (action === 'click') return `I would tap through ${device} ${role} to check the details, but I would not sign up yet.`;
+  return `This felt clear enough ${role} that I would actually sign up, not just keep scrolling.`;
 }
 
-function dwellForAction(action: PersonaAction, reported: number, seed: string): number {
-  const jitter = hash01(seed);
-  if (action === 'skip') return clampRange(reported > 0 && reported <= 6 ? reported : 1.2 + jitter * 3.2, 0.6, 6);
-  if (action === 'click') return clampRange(reported >= 3 && reported <= 16 ? reported : 4 + jitter * 8, 3, 16);
-  return clampRange(reported >= 8 && reported <= 28 ? reported : 10 + jitter * 12, 8, 28);
+function looksLivedIn(reason: string): boolean {
+  const trimmed = reason.trim();
+  if (trimmed.length < 22 || trimmed.length > 220) return false;
+  if (/matches the described|join the waitlist|sign up for the waitlist|product matches|approved claim/i.test(trimmed)) return false;
+  return /\bI\b|I'd|I'm|my /.test(trimmed);
 }
 
-function timeToActionForAction(action: PersonaAction, reported: number, seed: string): number {
+function dwellForAction(action: PersonaAction, reported: number, seed: string, device: PersonaTemplate['device']): number {
   const jitter = hash01(seed);
-  if (action === 'skip') return clampRange(reported > 0 && reported <= 5 ? reported : 0.8 + jitter * 2.4, 0.4, 5);
-  if (action === 'click') return clampRange(reported >= 2 && reported <= 12 ? reported : 2.5 + jitter * 6, 2, 12);
-  return clampRange(reported >= 5 && reported <= 22 ? reported : 7 + jitter * 10, 5, 22);
+  const phone = device === 'phone';
+  if (action === 'skip') return clampRange(reported > 0 && reported <= 6 ? reported : (phone ? 0.7 : 1.4) + jitter * (phone ? 2.2 : 3.2), phone ? 0.4 : 0.8, phone ? 4.5 : 6);
+  if (action === 'click') return clampRange(reported >= 3 && reported <= 16 ? reported : (phone ? 3.2 : 4.5) + jitter * 7, 2.5, 16);
+  return clampRange(reported >= 8 && reported <= 28 ? reported : 9 + jitter * 11, 7, 28);
+}
+
+function timeToActionForAction(action: PersonaAction, reported: number, seed: string, device: PersonaTemplate['device']): number {
+  const jitter = hash01(seed);
+  const phone = device === 'phone';
+  if (action === 'skip') return clampRange(reported > 0 && reported <= 5 ? reported : (phone ? 0.5 : 0.9) + jitter * (phone ? 1.6 : 2.4), phone ? 0.3 : 0.5, 5);
+  if (action === 'click') return clampRange(reported >= 2 && reported <= 12 ? reported : (phone ? 2 : 2.8) + jitter * 5.5, 1.8, 12);
+  return clampRange(reported >= 5 && reported <= 22 ? reported : 6.5 + jitter * 9, 5, 22);
 }
 
 function sigmoid(value: number): number {

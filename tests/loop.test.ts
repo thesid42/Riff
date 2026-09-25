@@ -415,15 +415,28 @@ describe('experiment loop', () => {
     expect(details.experiments).toHaveLength(3);
   }, 25_000);
 
-  it('stops with rules_failed and keeps the tested headlines when a proposal cites an unapproved claim', async () => {
-    app = loopApp(mockLiquid('skip', () => ({ headlines: ['Keeps drinks cold for 24 hours', 'A 750 ml bottle for the commute'] })));
-    const id = await startWave();
-    const details = await waitForStop(id, 'rules_failed');
+  it('restarts round numbers at 1 when the user starts a new loop on the same campaign', async () => {
+    app = loopApp(mockLiquid('skip', 'propose_test'), { maxAutoRounds: 2 });
+    const id = await startWave(8, { maxAutoRounds: 2 });
+    const first = await waitForStop(id, 'round_cap');
+    expect(first.experiments).toHaveLength(2);
+    expect(first.wave.loopStatus?.round).toBe(2);
 
-    expect(details.wave.loopStatus.message).toContain('"24"');
+    await startWave(8, { id, maxAutoRounds: 2 });
+    expect((await detailsFor(id)).wave.loopActivity?.round).toBe(1);
+    const second = await waitForStop(id, 'round_cap');
+    expect(second.experiments).toHaveLength(4);
+    expect(second.wave.loopStatus?.round).toBe(2);
+  }, 25_000);
+
+  it('keeps the tested headlines and continues when a proposal cites an unapproved claim', async () => {
+    app = loopApp(mockLiquid('skip', () => ({ headlines: ['Keeps drinks cold for 24 hours', 'A 750 ml bottle for the commute'] })), { maxAutoRounds: 2 });
+    const id = await startWave(8, { maxAutoRounds: 2 });
+    const details = await waitForStop(id, 'round_cap');
+
     expect(details.campaign.headlines).toEqual(headlines);
-    expect(details.experiments).toHaveLength(1);
-  }, 15_000);
+    expect(details.experiments).toHaveLength(2);
+  }, 20_000);
 
   it('stops with rules_failed when the next round could exceed the budget', async () => {
     app = loopApp(mockLiquid('skip', 'propose_test'));

@@ -143,7 +143,7 @@ export function buildPersonaCard(input: CustomPersonaInput): string {
   const home = `${input.location}, ${input.country}`;
   const device = input.device === 'desktop' ? 'a computer' : 'a phone';
   const household = input.household === 'family' ? 'You live with family.' : input.household === 'partner' ? 'You live with a partner.' : 'You live on your own.';
-  return `You are ${input.ageBand}, working as a ${input.job} in ${home}. You usually browse on ${device} in ${input.language}. ${household} Judge the ad as this person would.`.slice(0, 500);
+  return `You are ${input.ageBand}, working as a ${input.job} in ${home}. You usually browse on ${device} in ${input.language}. ${household} Speak in first person as this person scrolling a feed, not as a reviewer. Most ads you skip.`.slice(0, 500);
 }
 
 export function createCustomPersona(input: CustomPersonaInput, id: string): PersonaTemplate {

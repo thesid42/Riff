@@ -60,6 +60,8 @@ describe('human feed-scroll calibration', () => {
     const one = calibrateHumanJudgment({ judgment: collapsed, persona: student, seed: 'collapsed:1', mediaType: 'image' });
     expect(one.purchaseIntent).toBeLessThan(0.55);
     expect(one.noticedFirst === 'headline' || one.noticedFirst === 'image').toBe(true);
+    expect(one.reason).toMatch(/I |I'd |I'm /);
+    expect(one.reason).toMatch(/student|Austin|phone/i);
   });
 
   it('keeps the same seed deterministic', () => {

@@ -244,6 +244,9 @@ export class CampaignDatabase {
     if (!campaignColumns.has('max_auto_rounds')) {
       this.#database.exec('ALTER TABLE campaigns ADD COLUMN max_auto_rounds INTEGER');
     }
+    if (!campaignColumns.has('loop_origin')) {
+      this.#database.exec('ALTER TABLE campaigns ADD COLUMN loop_origin INTEGER NOT NULL DEFAULT 0');
+    }
     const creativeColumns = new Set((this.#database.prepare('PRAGMA table_info(creative_image_jobs)').all() as Array<{ name: string }>).map((column) => column.name));
     if (!creativeColumns.has('visual_mode')) {
       this.#database.exec("ALTER TABLE creative_image_jobs ADD COLUMN visual_mode TEXT NOT NULL DEFAULT 'shared' CHECK (visual_mode IN ('shared', 'distinct'))");
@@ -475,6 +478,16 @@ export class CampaignDatabase {
   setLoopActive(campaignId: string, active: boolean, now: string): void {
     this.#database.prepare('UPDATE campaigns SET loop_active = ?, updated_at = ? WHERE id = ?')
       .run(active ? 1 : 0, now, campaignId);
+  }
+
+  setLoopOrigin(campaignId: string, origin: number, now: string): void {
+    this.#database.prepare('UPDATE campaigns SET loop_origin = ?, updated_at = ? WHERE id = ?')
+      .run(Math.max(0, Math.floor(origin)), now, campaignId);
+  }
+
+  getLoopOrigin(campaignId: string): number {
+    const row = this.#database.prepare('SELECT loop_origin FROM campaigns WHERE id = ?').get(campaignId) as { loop_origin?: number } | undefined;
+    return typeof row?.loop_origin === 'number' && Number.isFinite(row.loop_origin) ? Math.max(0, row.loop_origin) : 0;
   }
 
   isLoopActive(campaignId: string): boolean {
