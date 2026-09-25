@@ -64,7 +64,12 @@ describe('backend API', () => {
     const listed = await app.inject({ method: 'GET', url: '/api/campaigns' });
     expect(listed.json().campaigns).toEqual([campaign]);
     const details = await app.inject({ method: 'GET', url: `/api/campaigns/${campaign.id}` });
-    expect(details.json()).toEqual({ campaign, variants: [], experiments: [], lessons: [] });
+    const detailsBody = details.json();
+    expect(detailsBody.campaign).toEqual(campaign);
+    expect(detailsBody.variants).toEqual([]);
+    expect(detailsBody.experiments).toEqual([]);
+    expect(detailsBody.lessons).toEqual([]);
+    expect(detailsBody.wave.runtime).toBe('idle');
   });
 
   it('returns structured not found errors for missing campaigns', async () => {

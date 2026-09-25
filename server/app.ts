@@ -3,19 +3,20 @@ import { resolve } from 'node:path';
 import Fastify, { type FastifyInstance, type FastifyReply } from 'fastify';
 import {
   campaignInputSchema,
-  emptyMetricsSnapshot,
   type IntegrationStatus,
 } from '../shared/types.js';
+import { persistHeadlinesSchema, runWaveSchema } from '../shared/run.js';
 import { creativeImageRequestSchema, creativeVideoRequestSchema } from '../shared/creative.js';
 import { CampaignDatabase } from './database.js';
 import { createProviders, getIntegrationStatuses, type Providers } from './providers/index.js';
 import { CreativeService, CreativeServiceError } from './creative.js';
+import { ExperimentRunService, RunServiceError } from './experiment-run.js';
 
 export interface CreateAppOptions {
   databasePath?: string;
   assetDir?: string;
   integrations?: IntegrationStatus[];
-  providers?: Partial<Pick<Providers, 'liquid' | 'bfl' | 'video' | 'videoEnabled'>>;
+  providers?: Partial<Pick<Providers, 'liquid' | 'analytics' | 'bfl' | 'video' | 'videoEnabled'>>;
   bflModel?: string;
   bflVideoModel?: string;
 }
@@ -34,7 +35,13 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     videoModel: options.bflVideoModel?.trim() || process.env.BFL_VIDEO_MODEL?.trim() || 'flux-3-video',
     bflModel: options.bflModel?.trim() || process.env.BFL_MODEL?.trim() || 'flux-2-pro',
   });
+  const runner = new ExperimentRunService({
+    database,
+    liquid: providers.liquid,
+    analytics: providers.analytics,
+  });
   database.markInterruptedCreativeJobs(new Date().toISOString());
+  runner.recover();
   const app = Fastify({ logger: false });
 
   app.addHook('onRequest', async (request, reply) => {
@@ -99,12 +106,59 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   app.get<{ Params: { id: string } }>('/api/campaigns/:id', async (request, reply) => {
     const campaign = database.getCampaign(request.params.id);
     if (!campaign) return notFound(reply, 'Campaign');
-    return { campaign, variants: [], experiments: [], lessons: [] };
+    return runner.details(campaign);
   });
 
   app.get<{ Params: { id: string } }>('/api/campaigns/:id/metrics', async (request, reply) => {
-    if (!database.getCampaign(request.params.id)) return notFound(reply, 'Campaign');
-    return emptyMetricsSnapshot(request.params.id);
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    return runner.metrics(campaign);
+  });
+
+  app.get<{ Params: { id: string } }>('/api/campaigns/:id/wave', async (request, reply) => {
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    return { wave: runner.snapshot(campaign) };
+  });
+
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/headlines', async (request, reply) => {
+    const parsed = persistHeadlinesSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'validation_error', message: 'Provide 2 or 3 unique headlines.' } });
+    }
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    try { return { campaign: runner.persistHeadlines(campaign, parsed.data.headlines) }; }
+    catch (error) { return sendRunError(reply, error); }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/run', async (request, reply) => {
+    const parsed = runWaveSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'validation_error', message: 'Wave settings are invalid.' } });
+    }
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    try {
+      const media = readyMedia(database.listCreativeJobs(campaign.id));
+      return { wave: await runner.start(campaign, parsed.data, media) };
+    } catch (error) { return sendRunError(reply, error); }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/pause', async (request, reply) => {
+    if (!isEmptyObject(request.body)) return reply.code(400).send({ error: { code: 'validation_error', message: 'The pause request must be an empty JSON object.' } });
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    try { return { wave: runner.pause(campaign) }; }
+    catch (error) { return sendRunError(reply, error); }
+  });
+
+  app.post<{ Params: { id: string } }>('/api/campaigns/:id/resume', async (request, reply) => {
+    if (!isEmptyObject(request.body)) return reply.code(400).send({ error: { code: 'validation_error', message: 'The resume request must be an empty JSON object.' } });
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    try { return { wave: runner.resume(campaign) }; }
+    catch (error) { return sendRunError(reply, error); }
   });
 
   app.get<{ Params: { id: string } }>('/api/campaigns/:id/creative', async (request, reply) => {
@@ -179,12 +233,12 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
 
   app.get<{ Params: { id: string } }>('/api/campaigns/:id/lessons', async (request, reply) => {
     if (!database.getCampaign(request.params.id)) return notFound(reply, 'Campaign');
-    return { lessons: [] };
+    return { lessons: database.listLessons(request.params.id) };
   });
 
   app.get<{ Params: { id: string } }>('/api/campaigns/:id/experiments', async (request, reply) => {
     if (!database.getCampaign(request.params.id)) return notFound(reply, 'Campaign');
-    return { experiments: [] };
+    return { experiments: database.listExperiments(request.params.id) };
   });
 
   app.setErrorHandler((error, _request, reply) => {
@@ -200,8 +254,12 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
     return reply.code(statusCode).send({ error: safeError });
   });
 
-  app.addHook('preClose', async () => { await creative.close(); });
+  app.addHook('preClose', async () => {
+    await runner.close();
+    await creative.close();
+  });
   app.addHook('onClose', async () => {
+    await runner.close();
     await creative.close();
     database.close();
   });
@@ -214,6 +272,18 @@ function notFound(reply: FastifyReply, entity: string): FastifyReply {
 
 function isEmptyObject(value: unknown): boolean {
   return !!value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0;
+}
+
+function readyMedia(jobs: Array<{ status: string; imageUrl: string | null; videoUrl: string | null }>): { imageUrl: string | null; videoUrl: string | null } {
+  const ready = jobs.find((job) => job.status === 'ready');
+  return { imageUrl: ready?.imageUrl ?? null, videoUrl: ready?.videoUrl ?? null };
+}
+
+function sendRunError(reply: FastifyReply, error: unknown): FastifyReply {
+  if (error instanceof RunServiceError) {
+    return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+  }
+  return reply.code(500).send({ error: { code: 'wave_failed', message: 'The persona wave could not be started.' } });
 }
 
 function sendCreativeError(reply: FastifyReply, error: unknown): FastifyReply {

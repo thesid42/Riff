@@ -6,7 +6,9 @@ import {
 import type {
   Campaign, Experiment, IntegrationStatus, Lesson, MetricsSnapshot, Variant,
 } from '../shared/types.js';
+import type { WaveSnapshot } from '../shared/run.js';
 import CreativeComposer from './CreativeComposer.js';
+import PersonaWave from './PersonaWave.js';
 
 type View = 'Campaign' | 'Experiments' | 'Lessons' | 'Connections';
 type Drawer = 'metrics' | 'setup' | null;
@@ -16,6 +18,7 @@ interface CampaignDetails {
   variants: Variant[];
   experiments: Experiment[];
   lessons: Lesson[];
+  wave?: WaveSnapshot;
 }
 
 interface ApiError extends Error {
@@ -99,6 +102,7 @@ export default function App() {
   const [drawer, setDrawer] = useState<Drawer>(null);
   const [saveError, setSaveError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [composerHeadlines, setComposerHeadlines] = useState<string[]>([]);
 
   const currentCampaign = campaigns.find((campaign) => campaign.id === selectedId) ?? null;
   const activeCampaign = details?.campaign.id === selectedId ? details.campaign : currentCampaign;
@@ -174,6 +178,20 @@ export default function App() {
       .finally(() => { if (!controller.signal.aborted) setMetricsLoading(false); });
     return () => controller.abort();
   }, [selectedId, campaignRetry]);
+
+  useEffect(() => {
+    if (!selectedId || details?.wave?.runtime !== 'running') return;
+    const timer = window.setInterval(() => {
+      const controller = new AbortController();
+      getJson<CampaignDetails>(`/api/campaigns/${encodeURIComponent(selectedId)}`, controller.signal)
+        .then((result) => { if (result.campaign.id === selectedId) setDetails(result); })
+        .catch(() => { /* The next poll retries. */ });
+      getJson<MetricsSnapshot>(`/api/campaigns/${encodeURIComponent(selectedId)}/metrics`, controller.signal)
+        .then((result) => { if (result.campaignId === selectedId) setMetrics(result); })
+        .catch(() => { /* The next poll retries. */ });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [selectedId, details?.wave?.runtime]);
 
   async function createCampaign(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -262,7 +280,7 @@ export default function App() {
                       ) : (
                       <h1>{listLoading || listError ? 'Campaign workspace' : 'Your next campaign starts here'}</h1>
                     )}
-                    {campaigns.length > 0 && <div className="campaign-meta"><span className="status-pill"><span className="status-dot" /> Draft</span><span>{activeCampaign?.product ?? 'Campaign brief'}</span></div>}
+                    {campaigns.length > 0 && <div className="campaign-meta"><span className="status-pill"><span className="status-dot" /> {details?.wave?.runtime === 'running' ? 'Draft · wave running' : details?.wave?.runtime === 'paused' ? 'Draft · wave paused' : 'Draft'}</span><span>{activeCampaign?.product ?? 'Campaign brief'}</span></div>}
                   </div>
                   <div className="heading-actions">
                     <button type="button" className="button button-secondary" onClick={() => setDrawer('setup')}><Settings2 size={16} /> Setup</button>
@@ -290,6 +308,9 @@ export default function App() {
                 onShowMetrics={() => setDrawer('metrics')}
                 onCreate={() => { setSaveError(''); setDialogOpen(true); }}
                 onRetryList={() => setListRetry((count) => count + 1)}
+                composerHeadlines={composerHeadlines.length ? composerHeadlines : (details?.campaign.headlines ?? activeCampaign?.headlines ?? [])}
+                onHeadlinesChange={setComposerHeadlines}
+                onWave={(wave) => setDetails((current) => current ? { ...current, wave, campaign: { ...current.campaign, runtime: wave.runtime, agentCount: wave.agentCount, concurrency: wave.concurrency, headlines: wave.headlines } } : current)}
               />
             )}
             {view === 'Experiments' && <RecordsView title="Experiments" description="Each experiment keeps its hypothesis and versions together." icon={<FlaskConical size={19} />} loading={detailsLoading} error={detailsError} onRetry={retryCampaign} hasCampaign={Boolean(activeCampaign)} emptyTitle="No experiments yet" emptyBody="Experiments will appear here when a campaign has real tests to review." items={details?.campaign.id === selectedId ? details.experiments : []} kind="experiment" />}
@@ -325,6 +346,7 @@ function LoadingState({ label }: { label: string }) {
 
 function CampaignDashboard({
   campaign, details, metrics, listLoading, listError, detailsLoading, metricsLoading, detailsError, metricsError, onRetry, onShowMetrics, onCreate, onRetryList,
+  composerHeadlines, onHeadlinesChange, onWave,
 }: {
   campaign: Campaign | null;
   details: CampaignDetails | null;
@@ -339,6 +361,9 @@ function CampaignDashboard({
   onShowMetrics: () => void;
   onCreate: () => void;
   onRetryList: () => void;
+  composerHeadlines: string[];
+  onHeadlinesChange: (headlines: string[]) => void;
+  onWave: (wave: WaveSnapshot) => void;
 }) {
   const totals = metrics?.totals;
   const spend = totals ? money(totals.spendCents) : '—';
@@ -381,12 +406,13 @@ function CampaignDashboard({
           <h2 id="next-title">{listLoading ? 'Checking saved campaigns…' : listError ? 'Campaigns could not be loaded.' : campaign ? 'Your campaign draft is saved.' : 'Start with a campaign brief.'}</h2>
           <p>{listError ? 'Retry the campaign list before creating a new draft, so existing work stays easy to find.' : campaign ? 'The product, audience, approved claims, and budget are saved. Results will appear when campaign activity is available.' : listLoading ? 'The workspace is checking for drafts saved on this device.' : 'Add a product, audience, approved claims, and demo budget to create a draft.'}</p>
           <div className="next-divider" />
-          {listError ? <button type="button" className="button button-secondary" onClick={onRetryList}>Retry campaign list <ArrowRight size={15} /></button> : campaign ? <div className="next-bottom"><span className="status-pill"><span className="status-dot" /> Draft</span><span>{detailsLoading ? 'Loading campaign' : 'No activity started'}</span></div> : <button type="button" className="button button-primary" onClick={onCreate} disabled={listLoading}><Plus size={16} /> Create campaign draft</button>}
+          {listError ? <button type="button" className="button button-secondary" onClick={onRetryList}>Retry campaign list <ArrowRight size={15} /></button> : campaign ? <div className="next-bottom"><span className="status-pill"><span className="status-dot" /> Draft</span><span>{details?.wave?.runtime === 'running' ? 'Persona wave running' : detailsLoading ? 'Loading campaign' : details?.wave?.progress.total ? `${details.wave.progress.succeeded} judged` : 'No activity started'}</span></div> : <button type="button" className="button button-primary" onClick={onCreate} disabled={listLoading}><Plus size={16} /> Create campaign draft</button>}
           {metrics?.message && <p className="source-message">{metrics.message}</p>}
         </section>
       </div>
 
-      {campaign && <CreativeComposer campaign={campaign} />}
+      {campaign && <CreativeComposer campaign={campaign} onHeadlinesChange={onHeadlinesChange} />}
+      {campaign && <PersonaWave campaignId={campaign.id} headlines={composerHeadlines} wave={details?.wave ?? null} onWave={onWave} />}
 
       <section className="creative-section" aria-labelledby="creative-title">
         <div className="creative-heading">
@@ -464,7 +490,7 @@ function CreativeCard({ variant, metrics }: { variant: Variant; metrics: Metrics
   return (
     <article className="creative-card">
       <div className="creative-card-head"><div className="creative-label"><span className="version-badge">{variant.label}</span><div><strong>{variant.headline || 'Untitled version'}</strong><span className={statusClass}><span className="status-dot" />{humanizeStatus(variant.status)}</span></div></div><span className="version-date">{displayTime(variant.createdAt) ?? '—'}</span></div>
-      <div className="creative-image-frame">{variant.imageUrl ? <img src={variant.imageUrl} alt={`${variant.label} creative`} loading="lazy" /> : <div className="creative-image-empty"><Sparkles size={24} /><span>No image attached</span></div>}</div>
+      <div className="creative-image-frame">{variant.videoUrl ? <video controls preload="metadata" src={variant.videoUrl} aria-label={`${variant.label} creative`} /> : variant.imageUrl ? <img src={variant.imageUrl} alt={`${variant.label} creative`} loading="lazy" /> : <div className="creative-image-empty"><Sparkles size={24} /><span>No image attached</span></div>}</div>
       <div className="creative-data-row">
         <span><strong>{totals ? count(totals.impressions) : '—'}</strong><small>Ad views</small></span>
         <span><strong>{totals ? count(totals.clicks) : '—'}</strong><small>Clicks</small></span>
@@ -648,6 +674,8 @@ function MetricsDetails({ campaign, metrics, loading, error, onRetry }: { campai
           <DetailMetric label="Sign-ups / views" value={percent(derived?.signupPerImpression)} />
           <DetailMetric label="Cost per click" value={money(derived?.costPerClickCents)} />
           <DetailMetric label="Cost per sign-up" value={money(derived?.costPerSignupCents)} />
+          <DetailMetric label="Median decide time" value={metrics.decideTimeMedianMs != null ? `${Math.round(metrics.decideTimeMedianMs)} ms` : '—'} />
+          <DetailMetric label="p90 decide time" value={metrics.decideTimeP90Ms != null ? `${Math.round(metrics.decideTimeP90Ms)} ms` : '—'} />
         </div>
         <p className="metrics-message">{metrics.message}</p>
         <p className="metrics-source">Analytics source: <strong>{humanizeStatus(metrics.source)}</strong></p>

@@ -1,0 +1,187 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FastifyInstance } from 'fastify';
+import { createApp } from '../server/app.js';
+import type { AnalyticsClient } from '../server/providers/analytics.js';
+import { ProviderError } from '../server/providers/common.js';
+import type { CreativeJudgmentWithMetadata, ExperimentDecisionWithMetadata } from '../server/providers/liquid.js';
+
+const judgment = (): CreativeJudgmentWithMetadata => ({
+  judgment: {
+    action: 'click',
+    reason: 'The capacity headline is concrete.',
+    dwellSeconds: 8,
+    timeToActionSeconds: 4,
+    confidence: 0.7,
+    attention: 0.6,
+    clarity: 0.8,
+    trust: 0.5,
+    purchaseIntent: 0.4,
+    noticedFirst: 'headline',
+    friction: 'none',
+  },
+  metadata: { elapsedMs: 120, usage: { promptTokens: 20, completionTokens: 30 } },
+});
+
+function mockLiquid() {
+  return {
+    judgeCreative: vi.fn(async () => judgment()),
+    proposeExperimentWithMetadata: vi.fn(async (): Promise<ExperimentDecisionWithMetadata> => ({
+      decision: {
+        action: 'wait',
+        explanation: 'Sample is enough to record a scoped observation, not a winner.',
+        hypothesis: '',
+        headlines: [],
+        evidenceIds: ['SEG-01'],
+      },
+      metadata: { elapsedMs: 80 },
+    })),
+  };
+}
+
+function mockAnalytics(): AnalyticsClient {
+  return {
+    provider: 'rawtree',
+    ingest: vi.fn(async (events) => events.length),
+    query: vi.fn(async () => []),
+  };
+}
+
+describe('persona wave', () => {
+  let directory: string;
+  let app: FastifyInstance;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'riff-run-'));
+    app = createApp({
+      databasePath: join(directory, 'campaigns.sqlite'),
+      providers: { liquid: mockLiquid() as never, analytics: mockAnalytics(), videoEnabled: false },
+    });
+  });
+
+  afterEach(async () => {
+    await app.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it('refuses a wave without two headlines', async () => {
+    const created = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Bottle', product: 'Bottle', audience: 'Commuters', approvedClaims: ['750 ml'], budgetCents: 5000 },
+    });
+    const id = created.json().campaign.id as string;
+    const response = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/run`, payload: { agentCount: 8, concurrency: 2 } });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().error.code).toBe('headlines_required');
+  });
+
+  it('persists Liquid headlines and starts a wave that writes analytics events', async () => {
+    const analytics = mockAnalytics();
+    const liquid = mockLiquid();
+    await app.close();
+    app = createApp({
+      databasePath: join(directory, 'campaigns.sqlite'),
+      providers: { liquid: liquid as never, analytics, videoEnabled: false },
+    });
+    const created = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Bottle', product: 'Bottle', audience: 'Commuters', approvedClaims: ['750 ml'], budgetCents: 5000 },
+    });
+    const id = created.json().campaign.id as string;
+    const saved = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/headlines`,
+      payload: { headlines: ['A 750 ml bottle for every day', 'Take 750 ml along for the day'] },
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json().campaign.headlines).toHaveLength(2);
+
+    const started = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/run`,
+      payload: { agentCount: 8, concurrency: 2, headlines: ['A 750 ml bottle for every day', 'Take 750 ml along for the day'] },
+    });
+    expect(started.statusCode).toBe(200);
+    expect(started.json().wave.runtime).toBe('running');
+    expect(started.json().wave.progress.total).toBe(8);
+
+    await vi.waitFor(async () => {
+      const details = await app.inject({ method: 'GET', url: `/api/campaigns/${id}` });
+      expect(details.json().wave.progress.succeeded + details.json().wave.progress.failed).toBe(8);
+      expect(details.json().wave.runtime).toBe('idle');
+      expect(details.json().wave.latestDecision?.action).toBe('wait');
+    }, { timeout: 5_000 });
+
+    const details = await app.inject({ method: 'GET', url: `/api/campaigns/${id}` });
+    expect(details.json().variants).toHaveLength(2);
+    expect(details.json().experiments).toHaveLength(1);
+    expect(details.json().wave.segments.length).toBeGreaterThan(0);
+    expect(liquid.judgeCreative).toHaveBeenCalled();
+    const judgeInput = liquid.judgeCreative.mock.calls[0][0];
+    expect(judgeInput.assignedHeadline).toBeTruthy();
+    expect(judgeInput.siblingHeadlines.length).toBe(1);
+    expect(analytics.ingest).toHaveBeenCalled();
+    const metrics = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/metrics` });
+    expect(metrics.json().totals.impressions).toBeGreaterThan(0);
+    expect(metrics.json().decideTimeMedianMs).toBe(120);
+    expect(details.json().wave.runtime).toBe('idle');
+    expect(details.json().wave.latestDecision?.action).toBe('wait');
+    expect(details.json().lessons).toHaveLength(1);
+    expect(details.json().wave.deciderSpeed.fastSampleSize + details.json().wave.deciderSpeed.slowSampleSize).toBe(8);
+    const ingested = (analytics.ingest as ReturnType<typeof vi.fn>).mock.calls.flatMap((call) => call[0] as Array<{ event_type: string; audience_segment?: string; decision_latency_ms?: number }>);
+    expect(ingested.some((event) => event.event_type === 'impression')).toBe(true);
+    expect(ingested.some((event) => event.event_type === 'click')).toBe(true);
+    expect(ingested.every((event) => event.audience_segment && event.decision_latency_ms === 120)).toBe(true);
+    expect(liquid.proposeExperimentWithMetadata).toHaveBeenCalledWith(expect.objectContaining({ stage: 'review' }));
+  });
+
+  it('keeps measured latency on failed jobs and does not invent a skip', async () => {
+    const analytics = mockAnalytics();
+    const liquid = {
+      judgeCreative: vi.fn(async () => { throw new ProviderError('Liquid request failed with HTTP 500.', 'response'); }),
+      proposeExperimentWithMetadata: vi.fn(),
+    };
+    await app.close();
+    app = createApp({
+      databasePath: join(directory, 'campaigns.sqlite'),
+      providers: { liquid: liquid as never, analytics, videoEnabled: false },
+    });
+    const created = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Bottle', product: 'Bottle', audience: 'Commuters', approvedClaims: ['750 ml'], budgetCents: 5000 },
+    });
+    const id = created.json().campaign.id as string;
+    const started = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/run`,
+      payload: { agentCount: 8, concurrency: 2, headlines: ['A 750 ml bottle for every day', 'Take 750 ml along for the day'] },
+    });
+    expect(started.statusCode).toBe(200);
+    await vi.waitFor(async () => {
+      const details = await app.inject({ method: 'GET', url: `/api/campaigns/${id}` });
+      expect(details.json().wave.progress.failed).toBe(8);
+    }, { timeout: 8_000 });
+    const details = await app.inject({ method: 'GET', url: `/api/campaigns/${id}` });
+    expect(details.json().wave.segments).toEqual([]);
+    expect(details.json().wave.lastError).toBe('Liquid request failed with HTTP 500.');
+    expect(analytics.ingest).not.toHaveBeenCalled();
+    const metrics = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/metrics` });
+    expect(metrics.json().totals.impressions).toBe(0);
+    expect(liquid.proposeExperimentWithMetadata).not.toHaveBeenCalled();
+  });
+
+  it('refuses a wave when Liquid or analytics is missing', async () => {
+    await app.close();
+    app = createApp({ databasePath: join(directory, 'campaigns.sqlite'), providers: { videoEnabled: false } });
+    const created = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Bottle', product: 'Bottle', audience: 'Commuters', approvedClaims: ['750 ml'], budgetCents: 5000 },
+    });
+    const id = created.json().campaign.id as string;
+    const response = await app.inject({
+      method: 'POST', url: `/api/campaigns/${id}/run`,
+      payload: { agentCount: 8, headlines: ['A 750 ml bottle for every day', 'Take 750 ml along for the day'] },
+    });
+    expect(response.statusCode).toBe(503);
+    expect(response.json().error.code).toBe('liquid_unavailable');
+  });
+});

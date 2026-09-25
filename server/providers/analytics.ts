@@ -3,6 +3,18 @@ import { ProviderError, boundedText, cancelBody, object, readJson, readTextBound
 export type AnalyticsEvent = {
   campaign_id: string; experiment_id: string; variant_id: string; event_id: string; visitor_id: string;
   timestamp: string; event_type: 'impression' | 'click' | 'signup'; cost_cents: number;
+  audience_segment?: string;
+  agent_id?: string;
+  decision_latency_ms?: number;
+  dwell_seconds?: number;
+  time_to_action_seconds?: number;
+  confidence?: number;
+  attention?: number;
+  clarity?: number;
+  trust?: number;
+  purchase_intent?: number;
+  noticed_first?: string;
+  friction?: string;
 };
 export type AnalyticsQuery = { campaignId: string; experimentId: string; start: string; end: string };
 export type AnalyticsMetricRow = {

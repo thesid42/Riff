@@ -26,7 +26,7 @@ export {
   LIQUID_MAX_TOKENS_LIMIT,
   LIQUID_TIMEOUT_MS_LIMIT,
 } from './liquid.js';
-export type { ExperimentContext, ExperimentDecision, ExperimentDecisionWithMetadata, LiquidClientConfig, LiquidResponseMetadata, LiquidUsageMetadata } from './liquid.js';
+export type { CreativeJudgeContext, CreativeJudgmentWithMetadata, ExperimentContext, ExperimentDecision, ExperimentDecisionWithMetadata, LiquidClientConfig, LiquidResponseMetadata, LiquidUsageMetadata } from './liquid.js';
 export { ProviderError } from './common.js';
 
 export interface Providers { liquid?: LiquidClient; analytics?: AnalyticsClient; bfl?: BflClient; video?: BflVideoClient; videoEnabled: boolean; }

@@ -54,11 +54,12 @@ export class CreativeService {
     this.assetDirectory = resolve(options.assetDirectory);
   }
 
-  getCampaignCreative(campaign: Campaign): { imagePromptSuggestion: string; capabilities: { image: true; video: boolean }; jobs: CreativeImageJob[] } {
+  getCampaignCreative(campaign: Campaign): { imagePromptSuggestion: string; capabilities: { image: true; video: boolean }; jobs: CreativeImageJob[]; headlines: string[] } {
     return {
       imagePromptSuggestion: suggestImagePrompt(campaign),
       capabilities: { image: true, video: this.options.videoEnabled && !!this.options.video },
       jobs: this.options.database.listCreativeJobs(campaign.id),
+      headlines: campaign.headlines,
     };
   }
 
@@ -74,6 +75,9 @@ export class CreativeService {
     if (brief.length > 4_000) throw new CreativeServiceError(422, 'brief_too_long', 'Campaign details exceed the experiment planner limit. Shorten the campaign name, product, audience, or approved claims.');
     try {
       const result = await this.options.liquid.proposeExperimentWithMetadata({ brief, evidence: [], lessons: [], stage: 'initial' }, signal);
+      if (result.decision.action === 'propose_test' && result.decision.headlines.length >= 2) {
+        this.options.database.setHeadlines(campaign.id, result.decision.headlines, new Date().toISOString());
+      }
       return result;
     } catch (error) {
       if (error instanceof ProviderError) throw new CreativeServiceError(error.code === 'configuration' ? 503 : 502, 'planner_failed', error.message);

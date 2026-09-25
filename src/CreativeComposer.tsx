@@ -169,7 +169,7 @@ function sameDraft(job: CreativeImageJob, headlines: string[], imagePrompt: stri
 
 function variantLabel(index: number): string { return String.fromCharCode(65 + index); }
 
-export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
+export default function CreativeComposer({ campaign, onHeadlinesChange }: { campaign: Campaign; onHeadlinesChange?: (headlines: string[]) => void }) {
   const [campaignStates, setCampaignStates] = useState<Record<string, ComposerState>>({});
   const [viewer, setViewer] = useState<ViewerItem | null>(null);
   const planControllers = useRef(new Map<string, AbortController>());
@@ -184,11 +184,12 @@ export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
     const campaignId = campaign.id;
     const controller = new AbortController();
     updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'loading', loadError: '' }));
-    getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities> }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal)
+    getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities>; headlines?: string[] }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal)
       .then((result) => {
         if (controller.signal.aborted) return;
         if (typeof result?.imagePromptSuggestion !== 'string' || !Array.isArray(result.jobs)) throw new Error('Creative settings could not be read.');
         const jobs = result.jobs.filter((job) => isCreativeJob(job, campaignId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        const headlines = Array.isArray(result.headlines) ? result.headlines.filter((item) => typeof item === 'string') : [];
         updateCampaign(campaignId, (current) => ({
           ...current,
           loadStatus: 'ready',
@@ -196,8 +197,11 @@ export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
           imagePromptSuggestion: result.imagePromptSuggestion,
           imagePrompt: current.promptEdited ? current.imagePrompt : result.imagePromptSuggestion,
           jobs,
+          headlines: current.headlines.length >= 2 ? current.headlines : headlines,
+          manualEditing: current.manualEditing || (current.headlines.length < 2 && headlines.length >= 2),
           capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true },
         }));
+        if (headlines.length >= 2) onHeadlinesChange?.(headlines);
       })
       .catch((error: unknown) => {
         if (!controller.signal.aborted) updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'error', loadError: error instanceof Error ? error.message : 'Creative drafts could not be loaded.' }));
@@ -245,6 +249,7 @@ export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
         headlines: decision.action === 'propose_test' ? decision.headlines : [],
         manualEditing: false,
       }));
+      if (decision.action === 'propose_test') onHeadlinesChange?.(decision.headlines);
     } catch (error) {
       if (!controller.signal.aborted) updateCampaign(campaign.id, (current) => ({ ...current, planLoading: false, planError: error instanceof Error ? error.message : 'Headline suggestions could not be loaded.' }));
     } finally {
@@ -297,15 +302,29 @@ export default function CreativeComposer({ campaign }: { campaign: Campaign }) {
   }
 
   function updateHeadline(index: number, value: string) {
-    updateCampaign(campaign.id, (current) => ({ ...current, generationError: '', headlines: current.headlines.map((headline, currentIndex) => currentIndex === index ? value : headline) }));
+    updateCampaign(campaign.id, (current) => {
+      const headlines = current.headlines.map((headline, currentIndex) => currentIndex === index ? value : headline);
+      onHeadlinesChange?.(headlines);
+      return { ...current, generationError: '', headlines };
+    });
   }
 
   function updatePrompt(value: string) {
     updateCampaign(campaign.id, (current) => ({ ...current, generationError: '', imagePrompt: value, promptEdited: true }));
   }
 
-  const addHeadline = () => updateCampaign(campaign.id, (current) => current.headlines.length >= 3 ? current : { ...current, headlines: [...current.headlines, ''] });
-  const removeHeadline = (index: number) => updateCampaign(campaign.id, (current) => current.headlines.length <= 2 ? current : { ...current, headlines: current.headlines.filter((_, currentIndex) => currentIndex !== index) });
+  const addHeadline = () => updateCampaign(campaign.id, (current) => {
+    if (current.headlines.length >= 3) return current;
+    const headlines = [...current.headlines, ''];
+    onHeadlinesChange?.(headlines);
+    return { ...current, headlines };
+  });
+  const removeHeadline = (index: number) => updateCampaign(campaign.id, (current) => {
+    if (current.headlines.length <= 2) return current;
+    const headlines = current.headlines.filter((_, currentIndex) => currentIndex !== index);
+    onHeadlinesChange?.(headlines);
+    return { ...current, headlines };
+  });
   const mediaWord = state.mediaType === 'video' ? 'video' : 'image';
   const activeRequestMessage = state.generationLoading ? `Generating a campaign ${mediaWord} draft. This can take up to ${state.mediaType === 'video' ? 'five' : 'two'} minutes; reload saved jobs later to check its status.` :
     activeJob ? 'A creative request is still in progress for this campaign. Refresh saved jobs to check its status.' :

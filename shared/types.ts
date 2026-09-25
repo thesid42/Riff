@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { CampaignRuntime } from './run.js';
 
 export const campaignInputSchema = z.object({
   name: z.string().trim().min(1).max(120),
@@ -22,6 +23,10 @@ export interface Campaign {
   budgetCents: number;
   currency: 'USD';
   status: 'draft';
+  runtime: CampaignRuntime;
+  agentCount: number;
+  concurrency: number;
+  headlines: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -31,9 +36,12 @@ export interface Variant {
   campaignId: string;
   label: string;
   headline: string;
+  offer: string;
   status: 'draft' | 'creating' | 'ready' | 'paused' | 'failed';
   imageUrl: string | null;
+  videoUrl: string | null;
   parentId: string | null;
+  experimentId: string | null;
   createdAt: string;
 }
 
@@ -43,6 +51,8 @@ export interface Experiment {
   hypothesis: string;
   status: 'draft' | 'collecting' | 'inconclusive' | 'completed';
   variantIds: string[];
+  windowStart: string | null;
+  windowEnd: string | null;
   createdAt: string;
 }
 
@@ -84,6 +94,8 @@ export interface MetricsSnapshot {
   variants: Array<{ variantId: string; totals: MetricTotals }>;
   series: Array<{ timestamp: string; variantId: string; signups: number }>;
   message: string;
+  decideTimeMedianMs?: number | null;
+  decideTimeP90Ms?: number | null;
 }
 
 export interface IntegrationStatus {

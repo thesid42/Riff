@@ -89,6 +89,9 @@ describe('creative composer API', () => {
     const plan = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/plan`, payload: {} });
     expect(plan.statusCode).toBe(200);
     expect(plan.json()).toEqual({ decision, metadata: { elapsedMs: 5, model: 'test-model' } });
+    const afterPlan = await app.inject({ method: 'GET', url: `/api/campaigns/${id}` });
+    expect(afterPlan.json().campaign.headlines).toEqual(decision.headlines);
+    expect((await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` })).json().headlines).toEqual(decision.headlines);
     expect(fixture.liquid.proposeExperimentWithMetadata).toHaveBeenCalledWith(expect.objectContaining({
       stage: 'initial', evidence: [], lessons: [],
       brief: expect.stringContaining(`Approved claims: ${JSON.stringify(campaignInput.approvedClaims)}`),

@@ -258,4 +258,67 @@ describe('OpenRouter Liquid adapter', () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await expectedTimeout;
   });
+
+  it('judges a supplied headline and media without proposing new copy', async () => {
+    const judgment = {
+      action: 'signup',
+      reason: 'The capacity is clear and the image looks practical.',
+      dwellSeconds: 9,
+      timeToActionSeconds: 5,
+      confidence: 0.8,
+      attention: 0.7,
+      clarity: 0.9,
+      trust: 0.6,
+      purchaseIntent: 0.5,
+      noticedFirst: 'headline',
+      friction: 'none',
+    };
+    let body: Record<string, any> | undefined;
+    const result = await client(async (_input, init = {}) => {
+      body = JSON.parse(String(init.body)) as Record<string, any>;
+      return openRouterResponse({ content: JSON.stringify(judgment) });
+    }).judgeCreative({
+      brief: 'Campaign: Bottle\nProduct: 750 ml bottle',
+      personaCard: 'You are a 25–34-year-old specialist.',
+      personaLabel: '25–34 specialist',
+      assignedHeadline: 'A 750 ml bottle for every day',
+      siblingHeadlines: ['Take 750 ml along for the day'],
+      mediaUrl: '/api/creative-assets/job-1',
+      mediaType: 'image',
+    });
+    expect(body?.response_format.json_schema.name).toBe('persona_judgment');
+    expect(body?.messages[1].content).toContain('A 750 ml bottle for every day');
+    expect(body?.messages[1].content).toContain('Take 750 ml along for the day');
+    expect(result.judgment).toEqual(judgment);
+    expect(result.metadata.elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(result.metadata.usage?.promptTokens).toBe(200);
+    expect(body?.max_tokens).toBe(LIQUID_DEFAULT_MAX_TOKENS);
+  });
+
+  it('keeps a valid persona judgment when the model hits the token cap after finishing JSON', async () => {
+    const judgment = {
+      action: 'skip',
+      reason: 'The headline feels generic.',
+      dwellSeconds: 3,
+      timeToActionSeconds: 2,
+      confidence: 0.4,
+      attention: 0.3,
+      clarity: 0.5,
+      trust: 0.4,
+      purchaseIntent: 0.2,
+      noticedFirst: 'headline',
+      friction: 'relevance',
+    };
+    const result = await client(async () => openRouterResponse({
+      choice: { finish_reason: 'length' },
+      content: JSON.stringify(judgment),
+    })).judgeCreative({
+      brief: 'Campaign: Bottle',
+      personaCard: 'You are a student.',
+      personaLabel: '18–24 student',
+      assignedHeadline: 'A 750 ml bottle for every day',
+      siblingHeadlines: ['Take 750 ml along for the day'],
+    });
+    expect(result.judgment.action).toBe('skip');
+  });
 });

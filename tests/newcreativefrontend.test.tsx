@@ -9,7 +9,7 @@ const timestamp = '2026-09-25T18:00:00.000Z';
 const campaign: Campaign = {
   id: 'campaign-image-test', name: 'Bottle launch', product: '750 ml bottle', audience: 'First-time visitors',
   goal: 'signups', approvedClaims: ['750 ml capacity', 'Stainless steel'], budgetCents: 5000, currency: 'USD',
-  status: 'draft', createdAt: timestamp, updatedAt: timestamp,
+  status: 'draft', runtime: 'idle', agentCount: 40, concurrency: 8, headlines: [], createdAt: timestamp, updatedAt: timestamp,
 };
 
 function job(overrides: Partial<CreativeImageJob> = {}): CreativeImageJob {

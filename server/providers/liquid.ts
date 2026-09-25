@@ -1,3 +1,5 @@
+import type { PersonaJudgment } from '../../shared/run.js';
+import { clampRange, clampUnit } from '../../shared/run.js';
 import { ProviderError, boundedText, cancelBody, object, readJson, rejectRedirect, safeBaseUrl, timeoutSignal, type FetchLike } from './common.js';
 
 export interface ExperimentContext {
@@ -30,6 +32,19 @@ export interface ExperimentDecisionWithMetadata {
   decision: ExperimentDecision;
   metadata: LiquidResponseMetadata;
 }
+export interface CreativeJudgeContext {
+  brief: string;
+  personaCard: string;
+  personaLabel: string;
+  assignedHeadline: string;
+  siblingHeadlines: string[];
+  mediaUrl?: string | null;
+  mediaType?: 'image' | 'video' | null;
+}
+export interface CreativeJudgmentWithMetadata {
+  judgment: PersonaJudgment;
+  metadata: LiquidResponseMetadata;
+}
 export interface LiquidClientConfig {
   baseUrl: string;
   model: string;
@@ -53,6 +68,25 @@ const DECISION_JSON_SCHEMA = {
     evidenceIds: { type: 'array', maxItems: 30, items: { type: 'string', maxLength: 100 } },
   },
   required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds'],
+  additionalProperties: false,
+} as const;
+
+const JUDGMENT_JSON_SCHEMA = {
+  type: 'object',
+  properties: {
+    action: { type: 'string', enum: ['skip', 'click', 'signup'] },
+    reason: { type: 'string', maxLength: 300 },
+    dwellSeconds: { type: 'number' },
+    timeToActionSeconds: { type: 'number' },
+    confidence: { type: 'number' },
+    attention: { type: 'number' },
+    clarity: { type: 'number' },
+    trust: { type: 'number' },
+    purchaseIntent: { type: 'number' },
+    noticedFirst: { type: 'string', enum: ['headline', 'image', 'offer', 'video', 'unsure'] },
+    friction: { type: 'string', enum: ['price', 'trust', 'relevance', 'busy', 'none'] },
+  },
+  required: ['action', 'reason', 'dwellSeconds', 'timeToActionSeconds', 'confidence', 'attention', 'clarity', 'trust', 'purchaseIntent', 'noticedFirst', 'friction'],
   additionalProperties: false,
 } as const;
 
@@ -146,7 +180,83 @@ export class LiquidClient {
       throw new ProviderError('Liquid network request failed.');
     } finally { timeout.dispose(); }
   }
+
+  async judgeCreative(context: CreativeJudgeContext, signal?: AbortSignal): Promise<CreativeJudgmentWithMetadata> {
+    const normalized = validateJudgeContext(context);
+    const startedAt = performance.now();
+    const timeout = timeoutSignal(this.timeoutMs, signal);
+    try {
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
+      const url = new URL('chat/completions', this.base.href.endsWith('/') ? this.base : `${this.base.href}/`);
+      const messages = [{ role: 'system', content: judgeSystemPrompt }, { role: 'user', content: JSON.stringify(normalized) }];
+      const requestBody = this.openRouter
+        ? {
+            model: this.model,
+            temperature: 0.4,
+            max_tokens: this.maxTokens,
+            response_format: { type: 'json_schema', json_schema: { name: 'persona_judgment', strict: true, schema: JUDGMENT_JSON_SCHEMA } },
+            provider: { require_parameters: true, allow_fallbacks: false },
+            reasoning: { exclude: true },
+            messages,
+          }
+        : { model: this.model, temperature: 0.4, max_tokens: this.maxTokens, response_format: { type: 'json_object' }, messages };
+      const response = await this.fetchImpl(url, {
+        method: 'POST', headers, redirect: 'error', signal: timeout.signal,
+        body: JSON.stringify(requestBody),
+      });
+      await rejectRedirect(response);
+      if (!response.ok) { await cancelBody(response); throw new ProviderError(`Liquid request failed with HTTP ${response.status}.`); }
+      const payload = object(await readJson(response, 256_000, timeout.signal));
+      if (payload.error !== undefined && payload.error !== null) throw new ProviderError('Liquid provider returned an error.', 'response');
+      const choices = payload.choices;
+      if (!Array.isArray(choices) || choices.length < 1) throw new ProviderError('Liquid response did not include a choice.', 'response');
+      const choice = object(choices[0]);
+      if (choice.error !== undefined && choice.error !== null) throw new ProviderError('Liquid provider returned an error.', 'response');
+      const hasFinishReason = Object.prototype.hasOwnProperty.call(choice, 'finish_reason');
+      const message = object(choice.message);
+      if (message.refusal !== undefined && message.refusal !== null && message.refusal !== '') throw new ProviderError('Liquid declined to provide a decision.', 'response');
+      if (hasToolCalls(message.tool_calls) || (message.function_call !== undefined && message.function_call !== null)) {
+        throw new ProviderError('Liquid response attempted to call a tool.', 'response');
+      }
+      if (typeof message.content !== 'string' || message.content.length > 16_000) throw new ProviderError('Liquid response content was invalid.', 'response');
+      let parsed: unknown;
+      try { parsed = JSON.parse(message.content); } catch {
+        if (choice.finish_reason === 'length') throw new ProviderError('Liquid response exhausted its completion token budget.', 'response');
+        throw new ProviderError('Liquid returned malformed decision JSON.', 'response');
+      }
+      let judgment: PersonaJudgment;
+      try { judgment = validateJudgment(parsed); }
+      catch (error) {
+        if (choice.finish_reason === 'length') throw new ProviderError('Liquid response exhausted its completion token budget.', 'response');
+        throw error;
+      }
+      if (hasFinishReason && choice.finish_reason !== 'stop' && choice.finish_reason !== 'length') {
+        throw new ProviderError('Liquid response did not finish cleanly.', 'response');
+      }
+      if (this.openRouter && !hasFinishReason) throw new ProviderError('OpenRouter response did not include a finish reason.', 'response');
+      const usage = readUsageMetadata(payload.usage);
+      const requestId = safeMetadataText(payload.id, 200);
+      const model = safeMetadataText(payload.model, 160) ?? this.model;
+      return {
+        judgment,
+        metadata: {
+          ...(requestId ? { requestId } : {}),
+          ...(model ? { model } : {}),
+          ...(hasFinishReason ? { finishReason: 'stop' } : {}),
+          elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+          ...(usage ? { usage } : {}),
+        },
+      };
+    } catch (error) {
+      if (timeout.signal.aborted) throw new ProviderError(signal?.aborted ? 'Liquid request was cancelled.' : 'Liquid request timed out.', 'timeout');
+      if (error instanceof ProviderError) throw error;
+      throw new ProviderError('Liquid network request failed.');
+    } finally { timeout.dispose(); }
+  }
 }
+
+const judgeSystemPrompt = 'You are a single fictional campaign viewer. Stay in the supplied persona. Judge only the assigned headline and optional shared media. Do not write new headlines. Return compact JSON only: action (skip, click, or signup), reason (one short sentence), dwellSeconds, timeToActionSeconds, confidence, attention, clarity, trust, purchaseIntent, noticedFirst, and friction. signup means you would join the waitlist. click means you would open the ad but not sign up. skip means you would ignore it. Scores are 0 to 1. Times are seconds from 0 to 60. Do not invent campaign results or claim this is a real customer. No tools.';
 
 const systemPrompt = 'You are a cautious campaign experiment planner. Return only JSON with action (wait or propose_test), explanation, hypothesis, headlines, and evidenceIds. For wait, hypothesis must be the literal empty string and headlines must be the literal empty array; never put placeholder words, rationale, or old headlines in either field. Example wait shape: {"action":"wait","explanation":"<replace with the context-based reason>","hypothesis":"","headlines":[],"evidenceIds":[]}. Replace the explanation with an actual reason from this context; cite only supplied evidence IDs when relevant, otherwise use an empty evidenceIds array. For propose_test, give one specific testable hypothesis comparing materially different headline angles and 2 or 3 comparable headlines. First check that the brief supplies product, approved facts or claims, audience, and goal; if an essential element is missing, choose wait. Never claim a test won or that a proposed hypothesis is a result. Ground each claim only in an explicitly supplied approved fact or claim: do not turn repeated use or other context into unsupported durability, lifespan, savings, or environmental guarantees. Change only the headline angle, and keep the image, offer, audience, landing page, and spend consistent across variants. Cite only supplied evidence IDs; do not invent IDs or evidence. No tools.';
 
@@ -230,4 +340,44 @@ function validateDecision(value: unknown, suppliedEvidence: Set<string>): Experi
   }
   if (!Array.isArray(v.evidenceIds) || v.evidenceIds.length > 30 || v.evidenceIds.some(id => typeof id !== 'string' || !suppliedEvidence.has(id))) throw new ProviderError('Liquid decision cited evidence that was not supplied.', 'response');
   return { action: v.action, explanation, hypothesis, headlines, evidenceIds: [...new Set(v.evidenceIds as string[])] };
+}
+
+function validateJudgeContext(context: CreativeJudgeContext): CreativeJudgeContext {
+  const siblingHeadlines = Array.isArray(context.siblingHeadlines) ? context.siblingHeadlines.map((headline) => boundedText(headline, 'sibling headline', 120)) : [];
+  if (siblingHeadlines.length > 3) throw new ProviderError('Judge context exceeds headline limits.', 'configuration');
+  return {
+    brief: boundedText(context?.brief, 'brief', 4_000),
+    personaCard: boundedText(context?.personaCard, 'persona card', 500),
+    personaLabel: boundedText(context?.personaLabel, 'persona label', 80),
+    assignedHeadline: boundedText(context?.assignedHeadline, 'assigned headline', 120),
+    siblingHeadlines,
+    mediaUrl: context.mediaUrl ? boundedText(context.mediaUrl, 'media URL', 500) : null,
+    mediaType: context.mediaType === 'image' || context.mediaType === 'video' ? context.mediaType : null,
+  };
+}
+
+function validateJudgment(value: unknown): PersonaJudgment {
+  const v = object(value, 'Liquid returned an invalid persona judgment.');
+  if (v.action !== 'skip' && v.action !== 'click' && v.action !== 'signup') throw new ProviderError('Persona action is invalid.', 'response');
+  const noticed = v.noticedFirst;
+  if (noticed !== 'headline' && noticed !== 'image' && noticed !== 'offer' && noticed !== 'video' && noticed !== 'unsure') {
+    throw new ProviderError('Persona noticedFirst is invalid.', 'response');
+  }
+  const friction = v.friction;
+  if (friction !== 'price' && friction !== 'trust' && friction !== 'relevance' && friction !== 'busy' && friction !== 'none') {
+    throw new ProviderError('Persona friction is invalid.', 'response');
+  }
+  return {
+    action: v.action,
+    reason: boundedText(v.reason, 'reason', 300),
+    dwellSeconds: clampRange(Number(v.dwellSeconds), 0, 60),
+    timeToActionSeconds: clampRange(Number(v.timeToActionSeconds), 0, 60),
+    confidence: clampUnit(Number(v.confidence)),
+    attention: clampUnit(Number(v.attention)),
+    clarity: clampUnit(Number(v.clarity)),
+    trust: clampUnit(Number(v.trust)),
+    purchaseIntent: clampUnit(Number(v.purchaseIntent)),
+    noticedFirst: noticed,
+    friction,
+  };
 }
