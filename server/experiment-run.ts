@@ -9,6 +9,7 @@ import {
   type DecisionRecord,
   type LoopStatus,
   type LoopStopReason,
+  type PersonaSegmentMetrics,
   type RoundSummary,
   type RunWaveInput,
   type WaveSnapshot,
@@ -16,6 +17,7 @@ import {
 import type { Campaign, Experiment, Lesson, MetricsSnapshot, Variant } from '../shared/types.js';
 import { emptyMetricsSnapshot } from '../shared/types.js';
 import type { CampaignDatabase } from './database.js';
+import { applyLessonToImagePrompt } from '../shared/image-prompts.js';
 import { IMAGE_TIMEOUT_MS, suggestImagePrompt, type CreativeAsset, type CreativeService } from './creative.js';
 import {
   DEFAULT_MAX_AUTO_ROUNDS,
@@ -125,7 +127,19 @@ export class ExperimentRunService {
       ingestError: this.ingestErrors.get(campaign.id) ?? null,
       reviewError: this.reviewErrors.get(campaign.id) ?? null,
       loopStatus: this.loopStatuses.get(campaign.id) ?? null,
+      loopContinuing: this.pendingRounds.has(campaign.id) || this.preparing.has(campaign.id) || this.options.database.isLoopActive(campaign.id),
+      loopActive: this.options.database.isLoopActive(campaign.id),
+      successClickRate: this.loopThreshold(campaign),
+      maxAutoRounds: this.loopMaxRounds(campaign),
     };
+  }
+
+  private loopThreshold(campaign: Campaign): number {
+    return campaign.successClickRate ?? this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE;
+  }
+
+  private loopMaxRounds(campaign: Campaign): number {
+    return campaign.maxAutoRounds ?? this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS;
   }
 
   details(campaign: Campaign): {
@@ -136,6 +150,7 @@ export class ExperimentRunService {
     decisions: DecisionRecord[];
     wave: WaveSnapshot;
   } {
+    this.backfillMissingLesson(campaign);
     return {
       campaign,
       variants: this.options.database.listVariants(campaign.id),
@@ -272,6 +287,14 @@ export class ExperimentRunService {
     // A manual start begins a fresh loop: clear the previous stop reason. Either way, record what
     // this round runs so the next chained round can decide what to carry forward.
     this.loopStatuses.delete(campaign.id);
+    if (input.successClickRate !== undefined || input.maxAutoRounds !== undefined) {
+      this.options.database.setLoopSettings(campaign.id, {
+        ...(input.successClickRate !== undefined ? { successClickRate: input.successClickRate } : {}),
+        ...(input.maxAutoRounds !== undefined ? { maxAutoRounds: input.maxAutoRounds } : {}),
+      }, new Date().toISOString());
+      campaign = this.options.database.getCampaign(campaign.id) ?? campaign;
+    }
+    this.options.database.setLoopActive(campaign.id, true, new Date().toISOString());
     if (!round.chained) {
       this.creativeNotes.delete(campaign.id);
       this.cancelPreparing(campaign.id);
@@ -355,13 +378,14 @@ export class ExperimentRunService {
     if (pending) { clearTimeout(pending); this.pendingRounds.delete(campaign.id); }
     this.cancelPreparing(campaign.id);
     // A manual pause ends the automatic loop; scheduleNextRound also re-checks runtime.
+    this.options.database.setLoopActive(campaign.id, false, new Date().toISOString());
     this.loopStatuses.set(campaign.id, {
       reason: 'paused',
       round: this.options.database.listExperiments(campaign.id).length,
-      maxRounds: this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS,
-      message: 'The wave was paused, so the automatic loop stopped.',
+      maxRounds: this.loopMaxRounds(campaign),
+      message: 'The campaign agent was paused, so automatic improvement stopped.',
       bestClickRate: null,
-      threshold: this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE,
+      threshold: this.loopThreshold(campaign),
       metricsSource: 'none',
     });
     // Between rounds there is no wave to resume, so the draft stays idle rather than paused.
@@ -374,6 +398,8 @@ export class ExperimentRunService {
   resume(campaign: Campaign): WaveSnapshot {
     if (campaign.runtime !== 'paused') throw new RunServiceError(409, 'wave_not_paused', 'There is no paused wave to resume.');
     if (!this.options.liquid || !this.options.analytics) throw new RunServiceError(503, 'provider_unavailable', 'Liquid and analytics must stay configured to resume.');
+    this.options.database.setLoopActive(campaign.id, true, new Date().toISOString());
+    this.loopStatuses.delete(campaign.id);
     this.options.database.setRuntime(campaign.id, 'running', campaign.agentCount, campaign.concurrency, new Date().toISOString());
     this.pump(campaign.id, campaign.concurrency);
     return this.snapshot(this.options.database.getCampaign(campaign.id)!);
@@ -381,6 +407,9 @@ export class ExperimentRunService {
 
   recover(): void {
     this.options.database.markInterruptedAgentJobs(new Date().toISOString());
+    for (const campaign of this.options.database.listLoopActiveCampaigns()) {
+      void this.resumeAgent(campaign.id);
+    }
   }
 
   async close(): Promise<void> {
@@ -536,17 +565,18 @@ export class ExperimentRunService {
     const now = new Date().toISOString();
     this.options.database.completeExperiment(experiment.id, succeeded === 0 ? 'inconclusive' : 'completed', now);
     this.options.database.setRuntime(campaignId, 'idle', campaign.agentCount, campaign.concurrency, now);
-    if (!this.options.liquid || succeeded === 0) return;
+    if (succeeded === 0) return;
     this.reviewErrors.delete(campaignId);
 
     // Step 5 feeding step 6: judge the round against the configured success threshold using the
     // same metrics the dashboard shows, and record which source decided it.
     const round = this.options.database.listExperiments(campaignId).length;
-    const maxRounds = this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS;
-    const threshold = this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE;
+    const maxRounds = this.loopMaxRounds(campaign);
+    const threshold = this.loopThreshold(campaign);
     const measured = await this.metricsForExperiment(campaign, { ...experiment, windowEnd: experiment.windowEnd ?? now });
     const bestClickRate = bestVariantClickRate(measured);
     const stop = (reason: LoopStopReason, message: string) => {
+      this.options.database.setLoopActive(campaignId, false, new Date().toISOString());
       const creativeNote = this.creativeNotes.get(campaignId);
       this.loopStatuses.set(campaignId, {
         reason, round, maxRounds, message, bestClickRate, threshold, metricsSource: measured.source === 'none' ? 'none' : measured.source,
@@ -575,7 +605,12 @@ export class ExperimentRunService {
       `Headlines tested: ${campaign.headlines.join(' | ')}`,
     ].join('\n');
     if (brief.length > 4_000) {
+      this.recordWaveLesson(campaign, experiment, fallbackLessonStatement(campaign.headlines, segments, bestClickRate), evidence.map((item) => item.id));
       stop('review_failed', 'Campaign details exceed the experiment planner limit, so the loop stopped. Shorten the campaign name, product, audience, or approved claims.');
+      return;
+    }
+    if (!this.options.liquid) {
+      this.recordWaveLesson(campaign, experiment, fallbackLessonStatement(campaign.headlines, segments, bestClickRate), evidence.map((item) => item.id));
       return;
     }
     try {
@@ -586,17 +621,24 @@ export class ExperimentRunService {
         personas: segments.map((segment) => ({ id: segment.segment, label: segment.label })),
         stage: 'review',
       });
+      const proposed = result.decision.action === 'wait' && headlineSetSchema.safeParse(result.decision.headlines).success
+        ? {
+          ...result.decision,
+          action: 'propose_test' as const,
+          hypothesis: result.decision.hypothesis.trim() || 'The latest wave supports a follow-up headline and creative test.',
+        }
+        : result.decision;
       const decision: DecisionRecord = {
         id: randomUUID(),
         campaignId,
         experimentId: experiment.id,
-        action: result.decision.action,
-        explanation: result.decision.explanation,
-        hypothesis: result.decision.hypothesis,
-        headlines: result.decision.headlines,
-        evidenceIds: result.decision.evidenceIds,
-        personaIds: result.decision.personaIds,
-        needsNewCreative: result.decision.needsNewCreative,
+        action: proposed.action,
+        explanation: proposed.explanation,
+        hypothesis: proposed.hypothesis,
+        headlines: proposed.headlines,
+        evidenceIds: proposed.evidenceIds,
+        personaIds: proposed.personaIds,
+        needsNewCreative: proposed.needsNewCreative,
         creativeOutcome: null,
         createdAt: new Date().toISOString(),
       };
@@ -620,8 +662,8 @@ export class ExperimentRunService {
       // wait below the threshold: the evidence is too weak to plan from, so keep collecting on
       // the same experiment (6 → 4). Plan, rules and creative do not change, but the round still
       // counts toward the cap and must fit the budget.
-      if (result.decision.action === 'wait') {
-        if (round >= maxRounds) {
+      if (proposed.action === 'wait') {
+        if (atRoundCap(round, maxRounds)) {
           stop('round_cap', `Liquid asked for more evidence, but the loop reached its limit of ${maxRounds} rounds. Start another wave manually to continue.`);
           return;
         }
@@ -646,13 +688,13 @@ export class ExperimentRunService {
       // Step 2: check the proposal against the brief's claims, the budget and the test rules
       // before anything is applied. A failure leaves the tested headlines in place.
       const spend = await this.spendSoFar(campaign);
-      const violation = checkRules(campaign, result.decision.headlines, spend, campaign.agentCount);
+      const violation = checkRules(campaign, proposed.headlines, spend, campaign.agentCount);
       if (violation) {
         stop('rules_failed', violation);
         return;
       }
-      this.options.database.setHeadlines(campaignId, result.decision.headlines, decision.createdAt);
-      if (round >= maxRounds) {
+      this.options.database.setHeadlines(campaignId, proposed.headlines, decision.createdAt);
+      if (atRoundCap(round, maxRounds)) {
         stop('round_cap', `The loop reached its limit of ${maxRounds} rounds. Start another wave manually to continue.`);
         return;
       }
@@ -660,15 +702,156 @@ export class ExperimentRunService {
       this.scheduleNextRound(campaignId, round, {
         kind: 'test',
         decisionId: decision.id,
-        hypothesis: result.decision.hypothesis,
-        personaIds: result.decision.personaIds,
-        needsNewCreative: result.decision.needsNewCreative,
+        hypothesis: proposed.hypothesis,
+        personaIds: proposed.personaIds,
+        needsNewCreative: proposed.needsNewCreative,
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Campaign review failed.';
       this.reviewErrors.set(campaignId, message);
-      stop('review_failed', `The review step failed, so the loop stopped: ${message}`);
+      this.recordWaveLesson(campaign, experiment, fallbackLessonStatement(campaign.headlines, segments, bestClickRate), evidence.map((item) => item.id));
+      if (atRoundCap(round, maxRounds)) {
+        stop('review_failed', `The review step failed, so the loop stopped: ${message}`);
+        return;
+      }
+      const spend = await this.spendSoFar(campaign);
+      const overBudget = budgetViolation(campaign, spend, campaign.agentCount);
+      if (overBudget) {
+        stop('rules_failed', overBudget);
+        return;
+      }
+      const fallback = this.fallbackDecision(campaign, experiment, fallbackLessonStatement(campaign.headlines, segments, bestClickRate), evidence.map((item) => item.id));
+      this.loopStatuses.delete(campaignId);
+      this.scheduleNextRound(campaignId, round, {
+        kind: 'test',
+        decisionId: fallback.id,
+        hypothesis: fallback.hypothesis,
+        personaIds: [],
+        needsNewCreative: true,
+      });
     }
+  }
+
+  private fallbackDecision(campaign: Campaign, experiment: Experiment, statement: string, evidenceIds: string[]): DecisionRecord {
+    const existing = this.options.database.latestDecision(campaign.id);
+    if (existing?.experimentId === experiment.id) return existing;
+    const decision: DecisionRecord = {
+      id: randomUUID(),
+      campaignId: campaign.id,
+      experimentId: experiment.id,
+      action: 'propose_test',
+      explanation: statement,
+      hypothesis: 'Use the latest experiment learning to improve the next headline-and-visual test.',
+      headlines: campaign.headlines,
+      evidenceIds,
+      personaIds: [],
+      needsNewCreative: true,
+      creativeOutcome: null,
+      createdAt: new Date().toISOString(),
+    };
+    return this.options.database.createDecision(decision);
+  }
+
+  /** Resume a persisted campaign agent after a process restart. */
+  private async resumeAgent(campaignId: string): Promise<void> {
+    const campaign = this.options.database.getCampaign(campaignId);
+    if (!campaign || !this.options.database.isLoopActive(campaignId) || !this.options.liquid || !this.options.analytics) return;
+    const experiment = this.options.database.latestExperiment(campaignId);
+    if (!experiment) return;
+    const jobs = this.options.database.listAgentJobs(campaignId, experiment.id);
+    const unfinished = jobs.some((job) => job.status === 'pending' || job.status === 'running');
+    if (unfinished || experiment.status === 'collecting') {
+      this.loopStatuses.delete(campaignId);
+      if (campaign.runtime !== 'running') {
+        this.options.database.setRuntime(campaignId, 'running', campaign.agentCount, campaign.concurrency, new Date().toISOString());
+      }
+      this.pump(campaignId, campaign.concurrency);
+      return;
+    }
+    const measured = await this.metricsForExperiment(campaign, experiment);
+    const threshold = this.loopThreshold(campaign);
+    const maxRounds = this.loopMaxRounds(campaign);
+    const round = this.options.database.listExperiments(campaignId).length;
+    if (atRoundCap(round, maxRounds)) {
+      this.options.database.setLoopActive(campaignId, false, new Date().toISOString());
+      this.loopStatuses.set(campaignId, {
+        reason: 'round_cap',
+        round,
+        maxRounds,
+        message: `The loop reached its limit of ${maxRounds} rounds. Start another wave manually to continue.`,
+        bestClickRate: bestVariantClickRate(measured),
+        threshold,
+        metricsSource: measured.source === 'none' ? 'none' : measured.source,
+      });
+      return;
+    }
+    const bestClickRate = bestVariantClickRate(measured);
+    if (bestClickRate != null && bestClickRate >= threshold) {
+      this.options.database.setLoopActive(campaignId, false, new Date().toISOString());
+      this.loopStatuses.set(campaignId, {
+        reason: 'threshold_met',
+        round: this.options.database.listExperiments(campaignId).length,
+        maxRounds: this.loopMaxRounds(campaign),
+        message: `A variant reached a ${(bestClickRate * 100).toFixed(1)}% click rate, meeting the ${(threshold * 100).toFixed(1)}% threshold, so the loop stopped.`,
+        bestClickRate,
+        threshold,
+        metricsSource: measured.source === 'none' ? 'none' : measured.source,
+      });
+      return;
+    }
+    const fallback = this.fallbackDecision(
+      campaign,
+      experiment,
+      this.options.database.listLessons(campaignId).find((lesson) => lesson.experimentId === experiment.id)?.statement
+        ?? fallbackLessonStatement(campaign.headlines, segmentMetrics(jobs, campaign.customPersonas), bestClickRate),
+      [],
+    );
+    this.scheduleNextRound(campaignId, this.options.database.listExperiments(campaignId).length, {
+      kind: 'test',
+      decisionId: fallback.id,
+      hypothesis: fallback.hypothesis,
+      personaIds: [],
+      needsNewCreative: true,
+    });
+  }
+
+  /** Completed waves without a lesson still get one from the stored jobs. */
+  private backfillMissingLesson(campaign: Campaign): void {
+    const existing = new Set(
+      this.options.database.listLessons(campaign.id).map((lesson) => lesson.experimentId),
+    );
+    for (const experiment of this.options.database.listExperiments(campaign.id)) {
+      if (experiment.status === 'collecting' || existing.has(experiment.id)) continue;
+      const jobs = this.options.database.listAgentJobs(campaign.id, experiment.id);
+      if (!jobs.some((job) => job.status === 'succeeded')) continue;
+      const segments = segmentMetrics(jobs, campaign.customPersonas)
+        .sort((a, b) => b.sampleSize - a.sampleSize || a.segment.localeCompare(b.segment))
+        .slice(0, 30);
+      this.recordWaveLesson(
+        campaign,
+        experiment,
+        fallbackLessonStatement(campaign.headlines, segments, null),
+        segments.map((_, index) => `SEG-${String(index + 1).padStart(2, '0')}`),
+      );
+      existing.add(experiment.id);
+    }
+  }
+
+  private recordWaveLesson(campaign: Campaign, experiment: Experiment, statement: string, evidenceIds: string[]): void {
+    if (this.options.database.listLessons(campaign.id).some((lesson) => lesson.experimentId === experiment.id)) return;
+    const clean = statement.trim().replace(/\s+/g, ' ').slice(0, 500);
+    if (!clean) return;
+    this.options.database.createLesson({
+      id: randomUUID(),
+      campaignId: campaign.id,
+      statement: clean,
+      audience: campaign.audience,
+      offer: DEFAULT_OFFER,
+      experimentId: experiment.id,
+      evidenceIds,
+      status: 'active',
+      createdAt: new Date().toISOString(),
+    });
   }
 
   /** Simulated spend across every round of the campaign, from the same source the dashboard reads. */
@@ -703,32 +886,40 @@ export class ExperimentRunService {
   }
 
   private async runNextRound(campaignId: string, round: number, next: NextRound, signal: AbortSignal): Promise<void> {
+    const campaign = this.options.database.getCampaign(campaignId);
     const failed = (reason: LoopStopReason, message: string) => {
       this.loopStatuses.set(campaignId, {
         reason,
         round,
-        maxRounds: this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS,
+        maxRounds: campaign ? this.loopMaxRounds(campaign) : this.options.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS,
         message,
         bestClickRate: null,
-        threshold: this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE,
+        threshold: campaign ? this.loopThreshold(campaign) : this.options.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE,
         metricsSource: 'none',
       });
     };
     try {
       // Re-read state: the user may have paused, deleted, or restarted in the meantime.
-      const campaign = this.options.database.getCampaign(campaignId);
       if (!campaign || campaign.runtime !== 'idle' || this.workers.has(campaignId)) return;
       const current = this.loopRounds.get(campaignId) ?? { headlines: [], media: [], visualMode: 'text-only' as const, personaIds: [], hypothesis: '' };
 
       // Step 3: create or reuse the creative. A collection round keeps everything as it was.
-      const creative: RoundCreative = next.kind === 'collect'
+      let creative: RoundCreative = next.kind === 'collect'
         ? { ok: true, outcome: hasMedia(current.media) ? 'reused' : 'text-only', media: current.media, visualMode: current.visualMode }
         : await this.creativeForRound(campaign, current, next.needsNewCreative, signal);
       if (signal.aborted) return;
       if (!creative.ok) {
-        // Never fall back to the previous round's images: that would look like new creative.
-        failed('creative_failed', `Step 3 could not produce new creative, so no round was started: ${creative.message}`);
-        return;
+        // Keep the agent moving: a failed image job must not kill the whole campaign loop.
+        const fallbackMedia = hasMedia(current.media)
+          ? current.media
+          : campaign.headlines.map(() => ({ imageUrl: null, videoUrl: null }));
+        creative = {
+          ok: true,
+          outcome: hasMedia(current.media) ? 'reused' : 'text-only',
+          media: fallbackMedia,
+          visualMode: hasMedia(current.media) ? current.visualMode : 'text-only',
+          note: `New creative was not ready (${creative.message}) so this round continued on the previous visual.`,
+        };
       }
       if (creative.note) this.creativeNotes.set(campaignId, creative.note);
 
@@ -778,12 +969,13 @@ export class ExperimentRunService {
 
     let jobId: string;
     try {
+      const lesson = latestLessonStatement(this.options.database, campaign.id);
       const job = await creative.createImageJob(campaign, {
         // A fresh ID per round, so a retry never collides with the previous round's reservation.
         requestId: randomUUID(),
         headlines,
-        imagePrompt: suggestImagePrompt(campaign),
-        variantPrompts: loopVariantPrompts(campaign, headlines),
+        imagePrompt: applyLessonToImagePrompt(suggestImagePrompt(campaign), lesson),
+        variantPrompts: loopVariantPrompts(campaign, headlines, lesson),
       }, signal);
       jobId = job.id;
     } catch (error) {
@@ -831,11 +1023,32 @@ function compareRoundMedia(previous: Variant[], current: Variant[]): CreativeOut
   return now.some((url) => url && !before.has(url)) ? 'new' : 'reused';
 }
 
+function atRoundCap(round: number, maxRounds: number): boolean {
+  return maxRounds > 0 && round >= maxRounds;
+}
+
+function fallbackLessonStatement(headlines: string[], segments: PersonaSegmentMetrics[], bestClickRate: number | null): string {
+  const tested = headlines.filter(Boolean).join(' | ') || 'the tested headlines';
+  const rate = bestClickRate == null ? 'not measured' : `${(bestClickRate * 100).toFixed(1)}%`;
+  const lead = segments[0];
+  const result = lead
+    ? `${lead.label} had ${lead.signups}/${lead.views} sign-ups${lead.topFriction && lead.topFriction !== 'none' ? `, with ${lead.topFriction} as the main friction` : ''}.`
+    : 'No persona segment produced a usable result.';
+  return `After testing ${tested}, the best click rate was ${rate}. ${result}`;
+}
+
+function latestLessonStatement(database: CampaignDatabase, campaignId: string): string {
+  return database.listLessons(campaignId)[0]?.statement ?? '';
+}
+
 /** One visual per headline, so each round compares complete headline-and-visual concepts. */
-function loopVariantPrompts(campaign: Campaign, headlines: string[]): string[] {
+function loopVariantPrompts(campaign: Campaign, headlines: string[], lesson = ''): string[] {
   const base = suggestImagePrompt(campaign);
   return headlines.map((headline, index) =>
-    `${base} Concept ${String.fromCharCode(65 + index)}: compose the scene to suit the headline "${headline}", which will be added later; render no text in the image.`);
+    applyLessonToImagePrompt(
+      `${base} Concept ${String.fromCharCode(65 + index)}: compose the scene to suit the headline "${headline}", which will be added later; render no text in the image.`,
+      lesson,
+    ));
 }
 
 /**

@@ -55,12 +55,20 @@ export class CreativeService {
     this.assetDirectory = resolve(options.assetDirectory);
   }
 
-  getCampaignCreative(campaign: Campaign): { imagePromptSuggestion: string; capabilities: { image: true; video: boolean }; jobs: CreativeImageJob[]; headlines: string[] } {
+  getCampaignCreative(campaign: Campaign): {
+    imagePromptSuggestion: string;
+    capabilities: { image: true; video: boolean };
+    jobs: CreativeImageJob[];
+    headlines: string[];
+    latestLesson: { id: string; statement: string } | null;
+  } {
+    const latest = this.options.database.listLessons(campaign.id)[0] ?? null;
     return {
       imagePromptSuggestion: suggestImagePrompt(campaign),
       capabilities: { image: true, video: this.options.videoEnabled && !!this.options.video },
       jobs: this.options.database.listCreativeJobs(campaign.id),
       headlines: campaign.headlines,
+      latestLesson: latest ? { id: latest.id, statement: latest.statement } : null,
     };
   }
 

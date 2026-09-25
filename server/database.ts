@@ -34,6 +34,10 @@ export interface StoredCreativeVariantOutput extends CreativeVariantOutput {
 export type CreativeOutputPatch = Partial<Pick<StoredCreativeVariantOutput,
   'status' | 'imageUrl' | 'videoUrl' | 'error' | 'providerTaskId' | 'pollingUrl' | 'contentType'>>;
 
+const CAMPAIGN_COLUMNS = `id, name, product, audience, goal, approved_claims, budget_cents,
+  currency, status, runtime, agent_count, concurrency, headlines, custom_personas,
+  success_click_rate, max_auto_rounds, created_at, updated_at`;
+
 export type CreativeReservation =
   | { kind: 'created'; job: StoredCreativeImageJob }
   | { kind: 'existing'; job: StoredCreativeImageJob }
@@ -231,6 +235,15 @@ export class CampaignDatabase {
     if (!campaignColumns.has('custom_personas')) {
       this.#database.exec("ALTER TABLE campaigns ADD COLUMN custom_personas TEXT NOT NULL DEFAULT '[]'");
     }
+    if (!campaignColumns.has('loop_active')) {
+      this.#database.exec('ALTER TABLE campaigns ADD COLUMN loop_active INTEGER NOT NULL DEFAULT 0');
+    }
+    if (!campaignColumns.has('success_click_rate')) {
+      this.#database.exec('ALTER TABLE campaigns ADD COLUMN success_click_rate REAL');
+    }
+    if (!campaignColumns.has('max_auto_rounds')) {
+      this.#database.exec('ALTER TABLE campaigns ADD COLUMN max_auto_rounds INTEGER');
+    }
     const creativeColumns = new Set((this.#database.prepare('PRAGMA table_info(creative_image_jobs)').all() as Array<{ name: string }>).map((column) => column.name));
     if (!creativeColumns.has('visual_mode')) {
       this.#database.exec("ALTER TABLE creative_image_jobs ADD COLUMN visual_mode TEXT NOT NULL DEFAULT 'shared' CHECK (visual_mode IN ('shared', 'distinct'))");
@@ -268,8 +281,7 @@ export class CampaignDatabase {
 
   listCampaigns(): Campaign[] {
     const rows = this.#database.prepare(`
-      SELECT id, name, product, audience, goal, approved_claims, budget_cents,
-             currency, status, runtime, agent_count, concurrency, headlines, custom_personas, created_at, updated_at
+      SELECT ${CAMPAIGN_COLUMNS}
       FROM campaigns ORDER BY created_at DESC, id DESC
     `).all() as unknown as CampaignRow[];
     return rows.map(toCampaign);
@@ -277,8 +289,7 @@ export class CampaignDatabase {
 
   getCampaign(id: string): Campaign | undefined {
     const row = this.#database.prepare(`
-      SELECT id, name, product, audience, goal, approved_claims, budget_cents,
-             currency, status, runtime, agent_count, concurrency, headlines, custom_personas, created_at, updated_at
+      SELECT ${CAMPAIGN_COLUMNS}
       FROM campaigns WHERE id = ?
     `).get(id) as unknown as CampaignRow | undefined;
     return row ? toCampaign(row) : undefined;
@@ -449,6 +460,34 @@ export class CampaignDatabase {
     this.#database.prepare('UPDATE campaigns SET headlines = ?, updated_at = ? WHERE id = ?')
       .run(JSON.stringify(headlines), now, campaignId);
     return this.getCampaign(campaignId);
+  }
+
+  setLoopSettings(campaignId: string, settings: { successClickRate?: number; maxAutoRounds?: number }, now: string): Campaign | undefined {
+    const current = this.getCampaign(campaignId);
+    if (!current) return undefined;
+    const successClickRate = settings.successClickRate !== undefined ? settings.successClickRate : current.successClickRate ?? null;
+    const maxAutoRounds = settings.maxAutoRounds !== undefined ? settings.maxAutoRounds : current.maxAutoRounds ?? null;
+    this.#database.prepare('UPDATE campaigns SET success_click_rate = ?, max_auto_rounds = ?, updated_at = ? WHERE id = ?')
+      .run(successClickRate, maxAutoRounds, now, campaignId);
+    return this.getCampaign(campaignId);
+  }
+
+  setLoopActive(campaignId: string, active: boolean, now: string): void {
+    this.#database.prepare('UPDATE campaigns SET loop_active = ?, updated_at = ? WHERE id = ?')
+      .run(active ? 1 : 0, now, campaignId);
+  }
+
+  isLoopActive(campaignId: string): boolean {
+    const row = this.#database.prepare('SELECT loop_active FROM campaigns WHERE id = ?').get(campaignId) as { loop_active: number } | undefined;
+    return row?.loop_active === 1;
+  }
+
+  listLoopActiveCampaigns(): Campaign[] {
+    const rows = this.#database.prepare(`
+      SELECT ${CAMPAIGN_COLUMNS}
+      FROM campaigns WHERE loop_active = 1 ORDER BY updated_at ASC, id ASC
+    `).all() as unknown as CampaignRow[];
+    return rows.map(toCampaign);
   }
 
   setRuntime(campaignId: string, runtime: CampaignRuntime, agentCount: number, concurrency: number, now: string): Campaign | undefined {
@@ -671,6 +710,8 @@ interface CampaignRow {
   concurrency: number;
   headlines: string;
   custom_personas: string;
+  success_click_rate: number | null;
+  max_auto_rounds: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -812,6 +853,8 @@ function toCampaign(row: CampaignRow): Campaign {
     concurrency: row.concurrency ?? DEFAULT_CONCURRENCY,
     headlines: JSON.parse(row.headlines || '[]') as string[],
     customPersonas: JSON.parse(row.custom_personas || '[]') as Campaign['customPersonas'],
+    successClickRate: typeof row.success_click_rate === 'number' && Number.isFinite(row.success_click_rate) ? row.success_click_rate : null,
+    maxAutoRounds: typeof row.max_auto_rounds === 'number' && Number.isInteger(row.max_auto_rounds) ? row.max_auto_rounds : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };

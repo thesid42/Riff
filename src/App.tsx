@@ -45,6 +45,13 @@ function personaSummary(personas: RoundSummary['personas'] | undefined): string 
   return personas.length > 3 ? `${shown} +${personas.length - 3} more` : shown;
 }
 
+interface PendingLesson {
+  campaignId: string;
+  id: string;
+  statement: string;
+  token: number;
+}
+
 interface SelectedCreative {
   campaignId: string;
   jobId: string;
@@ -135,6 +142,7 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const [composerDrafts, setComposerDrafts] = useState<Record<string, string[]>>({});
   const [selectedCreative, setSelectedCreative] = useState<SelectedCreative | null>(null);
+  const [pendingLesson, setPendingLesson] = useState<PendingLesson | null>(null);
 
   const currentCampaign = campaigns.find((campaign) => campaign.id === selectedId) ?? null;
   const activeCampaign = details?.campaign.id === selectedId ? details.campaign : currentCampaign;
@@ -236,7 +244,7 @@ export default function App() {
   }, [selectedId, campaignRetry]);
 
   useEffect(() => {
-    if (!selectedId || details?.wave?.runtime !== 'running') return;
+    if (!selectedId || (details?.wave?.runtime !== 'running' && !details?.wave?.loopContinuing)) return;
     const controller = new AbortController();
     let inFlight = false;
     async function refreshWave() {
@@ -257,7 +265,7 @@ export default function App() {
     void refreshWave();
     const timer = window.setInterval(() => void refreshWave(), 2000);
     return () => { controller.abort(); window.clearInterval(timer); };
-  }, [selectedId, details?.wave?.runtime]);
+  }, [selectedId, details?.wave?.runtime, details?.wave?.loopContinuing]);
 
   async function createCampaign(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -346,7 +354,7 @@ export default function App() {
                       ) : (
                       <h1>{listLoading || listError ? 'Campaign workspace' : 'Your next campaign starts here'}</h1>
                     )}
-                    {campaigns.length > 0 && <div className="campaign-meta"><span className="status-pill"><span className="status-dot" /> {details?.wave?.runtime === 'running' ? 'Draft · wave running' : details?.wave?.runtime === 'paused' ? 'Draft · wave paused' : 'Draft'}</span><span>{activeCampaign?.product ?? 'Campaign brief'}</span></div>}
+                    {campaigns.length > 0 && <div className="campaign-meta"><span className="status-pill"><span className="status-dot" /> {details?.wave?.runtime === 'running' ? 'Draft · agent running' : details?.wave?.loopActive || details?.wave?.loopContinuing ? 'Draft · improving' : details?.wave?.runtime === 'paused' ? 'Draft · agent paused' : 'Draft'}</span><span>{activeCampaign?.product ?? 'Campaign brief'}</span></div>}
                   </div>
                   <div className="heading-actions">
                     {activeCampaign && <button type="button" className="button button-secondary" onClick={() => {
@@ -383,6 +391,7 @@ export default function App() {
                 initialHeadlines={hasComposerDraft || isStoredHeadlineSet(composerHeadlines) ? composerHeadlines : undefined}
                 onHeadlinesChange={(headlines) => activeCampaign && updateComposerHeadlines(activeCampaign.id, headlines)}
                 selectedCreativeJobId={currentCreativeSelection?.jobId ?? null}
+                pendingLesson={pendingLesson}
                 onUseForExperiment={(job, headlines) => {
                   if (!activeCampaign || !isValidHeadlineSet(headlines)) return;
                   updateComposerHeadlines(activeCampaign.id, [...headlines]);
@@ -410,7 +419,10 @@ export default function App() {
                 }}
               />
             )}
-            {view === 'Lessons' && <RecordsView title="Lessons" description="Evidence-backed observations stay tied to the audience and test that produced them." icon={<BookOpen size={19} />} loading={detailsLoading} error={detailsError} onRetry={retryCampaign} hasCampaign={Boolean(activeCampaign)} emptyTitle="No lessons recorded" emptyBody="Campaign learnings will show here with the experiment that supports each one." items={details?.campaign.id === selectedId ? details.lessons : []} kind="lesson" />}
+            {view === 'Lessons' && <RecordsView title="Lessons" description="Evidence-backed observations stay tied to the audience and test that produced them. Generate the next image or video from a learning in one click." icon={<BookOpen size={19} />} loading={detailsLoading} error={detailsError} onRetry={retryCampaign} hasCampaign={Boolean(activeCampaign)} emptyTitle="No lessons recorded" emptyBody="After a persona wave finishes, the automatic loop writes a learning here. Generate the next image or video from it in one click." items={details?.campaign.id === selectedId ? details.lessons : []} kind="lesson" onImprove={activeCampaign ? (lesson) => {
+              setPendingLesson({ campaignId: activeCampaign.id, id: lesson.id, statement: lesson.statement, token: Date.now() });
+              setView('Campaign');
+            } : undefined} />}
             {view === 'Connections' && <ConnectionsView integrations={integrations} loading={integrationsLoading} error={integrationsError} onRetry={() => setIntegrationRetry((count) => count + 1)} />}
           </>
         )}
@@ -442,7 +454,7 @@ function LoadingState({ label }: { label: string }) {
 
 function CampaignDashboard({
   campaign, details, metrics, rounds, listLoading, listError, detailsLoading, metricsLoading, detailsError, metricsError, onRetry, onShowMetrics, onCreate, onRetryList,
-  onOpenExperiments, initialHeadlines, onHeadlinesChange, selectedCreativeJobId, onUseForExperiment,
+  onOpenExperiments, initialHeadlines, onHeadlinesChange, selectedCreativeJobId, onUseForExperiment, pendingLesson,
 }: {
   campaign: Campaign | null;
   details: CampaignDetails | null;
@@ -463,6 +475,7 @@ function CampaignDashboard({
   onHeadlinesChange: (headlines: string[]) => void;
   selectedCreativeJobId: string | null;
   onUseForExperiment: (job: CreativeImageJob, headlines: string[]) => void;
+  pendingLesson?: PendingLesson | null;
 }) {
   const totals = metrics?.totals;
   const spend = totals ? money(totals.spendCents) : '—';
@@ -503,7 +516,7 @@ function CampaignDashboard({
           <h2 id="next-title">{listLoading ? 'Checking saved campaigns…' : listError ? 'Campaigns could not be loaded.' : campaign ? 'Your campaign draft is saved.' : 'Start with a campaign brief.'}</h2>
           <p>{listError ? 'Retry the campaign list before creating a new draft, so existing work stays easy to find.' : campaign ? metrics?.status === 'available' ? 'Your latest experiment results are shown alongside this brief. Compare the headline versions using the simulated sign-up counts and time axis.' : 'The product, audience, approved claims, and budget are saved. Results will appear when campaign activity is available.' : listLoading ? 'The workspace is checking for drafts saved on this device.' : 'Add a product, audience, approved claims, and demo budget to create a draft.'}</p>
           <div className="next-divider" />
-          {listError ? <button type="button" className="button button-secondary" onClick={onRetryList}>Retry campaign list <ArrowRight size={15} /></button> : campaign ? <div className="next-bottom"><span className="status-pill"><span className="status-dot" /> Draft</span><span>{details?.wave?.runtime === 'running' ? 'Persona wave running' : detailsLoading ? 'Loading campaign' : details?.wave?.progress.total ? `${details.wave.progress.succeeded} judged` : 'No activity started'}</span></div> : <button type="button" className="button button-primary" onClick={onCreate} disabled={listLoading}><Plus size={16} /> Create campaign draft</button>}
+          {listError ? <button type="button" className="button button-secondary" onClick={onRetryList}>Retry campaign list <ArrowRight size={15} /></button> : campaign ? <div className="next-bottom"><span className="status-pill"><span className="status-dot" /> Draft</span><span>{details?.wave?.runtime === 'running' ? 'Campaign agent running' : details?.wave?.loopActive || details?.wave?.loopContinuing ? 'Improving toward the target' : detailsLoading ? 'Loading campaign' : details?.wave?.progress.total ? `${details.wave.progress.succeeded} judged` : 'No activity started'}</span></div> : <button type="button" className="button button-primary" onClick={onCreate} disabled={listLoading}><Plus size={16} /> Create campaign draft</button>}
           {details?.wave?.loopStatus && (
             <p className={`loop-status loop-${details.wave.loopStatus.reason}`} role="status">
               {details.wave.loopStatus.message}
@@ -531,7 +544,7 @@ function CampaignDashboard({
           <div className="chart-footnote"><span>Metrics source: {humanizeStatus(entry.metrics.source)}</span><span>{displayTime(entry.experiment.windowStart) ?? '—'}</span></div>
         </article>)}</div>
       </details>}
-      {campaign && <CreativeComposer campaign={campaign} initialHeadlines={initialHeadlines} onHeadlinesChange={onHeadlinesChange} selectedCreativeJobId={selectedCreativeJobId} onUseForExperiment={onUseForExperiment} />}
+      {campaign && <CreativeComposer campaign={campaign} initialHeadlines={initialHeadlines} onHeadlinesChange={onHeadlinesChange} selectedCreativeJobId={selectedCreativeJobId} onUseForExperiment={onUseForExperiment} pendingLesson={pendingLesson} />}
 
       {campaign ? <section className="experiment-summary-link" aria-label="Experiment results">
         <div><h3>{details?.experiments.length ? 'Your experiment results are in Experiments' : 'Ready to compare your headlines?'}</h3><p>Keep generated creatives here. Compare simulated responses and review previous waves in Experiments.</p></div>
@@ -578,7 +591,7 @@ function ExperimentsView({
 }
 
 function RecordsView({
-  title, description, icon, loading, error, onRetry, hasCampaign, emptyTitle, emptyBody, items, kind,
+  title, description, icon, loading, error, onRetry, hasCampaign, emptyTitle, emptyBody, items, kind, onImprove,
 }: {
   title: string;
   description: string;
@@ -591,6 +604,7 @@ function RecordsView({
   emptyBody: string;
   items: Experiment[] | Lesson[];
   kind: 'experiment' | 'lesson';
+  onImprove?: (lesson: Lesson) => void;
 }) {
   return (
     <section className="records-view">
@@ -599,7 +613,7 @@ function RecordsView({
       {loading && <LoadingState label={`Loading ${title.toLowerCase()}…`} />}
       {!loading && items.length === 0 && <div className="empty-records"><span className="empty-record-icon">{kind === 'experiment' ? <FlaskConical size={20} /> : <BookOpen size={20} />}</span><h3>{hasCampaign ? emptyTitle : 'Choose a campaign to begin'}</h3><p>{hasCampaign ? emptyBody : 'Save a campaign draft and its experiments and lessons will appear here when they exist.'}</p></div>}
       {items.length > 0 && <div className="record-list">{items.map((item) => <article className="record-card" key={item.id}>
-        {kind === 'experiment' && 'hypothesis' in item ? <><div className="record-card-title"><div><span className="section-kicker">EXPERIMENT</span><h3>{item.hypothesis}</h3></div><span className="record-status">{humanizeStatus(item.status)}</span></div><div className="record-meta"><span>{item.variantIds.length} {item.variantIds.length === 1 ? 'version' : 'versions'}</span><span>Created {displayTime(item.createdAt) ?? '—'}</span></div></> : 'statement' in item ? <><div className="record-card-title"><div><span className="section-kicker">LEARNING</span><h3>{item.statement}</h3></div><span className="record-status">{humanizeStatus(item.status)}</span></div><p className="record-description"><strong>Audience:</strong> {item.audience} <span>·</span> <strong>Offer:</strong> {item.offer}</p><div className="record-meta"><span>{item.evidenceIds.length} evidence {item.evidenceIds.length === 1 ? 'item' : 'items'}</span><span>Created {displayTime(item.createdAt) ?? '—'}</span></div></> : null}
+        {kind === 'experiment' && 'hypothesis' in item ? <><div className="record-card-title"><div><span className="section-kicker">EXPERIMENT</span><h3>{item.hypothesis}</h3></div><span className="record-status">{humanizeStatus(item.status)}</span></div><div className="record-meta"><span>{item.variantIds.length} {item.variantIds.length === 1 ? 'version' : 'versions'}</span><span>Created {displayTime(item.createdAt) ?? '—'}</span></div></> : 'statement' in item ? <><div className="record-card-title"><div><span className="section-kicker">LEARNING</span><h3>{item.statement}</h3></div><span className="record-status">{humanizeStatus(item.status)}</span></div><p className="record-description"><strong>Audience:</strong> {item.audience} <span>·</span> <strong>Offer:</strong> {item.offer}</p><div className="record-meta"><span>{item.evidenceIds.length} evidence {item.evidenceIds.length === 1 ? 'item' : 'items'}</span><span>Created {displayTime(item.createdAt) ?? '—'}</span></div>{onImprove && <button type="button" className="button button-primary record-improve" onClick={() => onImprove(item)}>Generate next image or video</button>}</> : null}
       </article>)}</div>}
     </section>
   );

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildProductImagePrompt, buildProductImagePrompts } from '../shared/image-prompts.js';
+import { applyLessonToImagePrompt, buildProductImagePrompt, buildProductImagePrompts } from '../shared/image-prompts.js';
 import type { Campaign } from '../shared/types.js';
 import { suggestImagePrompt } from '../server/creative.js';
 
@@ -51,5 +51,16 @@ describe('commercial product image prompts', () => {
       concurrency: 8, headlines: [], customPersonas: [], createdAt: '2026-09-25T00:00:00.000Z', updatedAt: '2026-09-25T00:00:00.000Z',
     } satisfies Campaign;
     expect(suggestImagePrompt(campaign)).toBe(buildProductImagePrompt({ product: campaign.product, audience: campaign.audience }, 'hero'));
+  });
+
+  it('appends an experiment lesson to the next image or video prompt once', () => {
+    const base = 'Single steel lunch jar on a desk.';
+    const lesson = 'Desk workers skipped the wide product hero.';
+    const first = applyLessonToImagePrompt(base, lesson);
+    expect(first).toContain(base);
+    expect(first).toContain('Apply this experiment learning to the next image or video:');
+    expect(first).toContain(lesson);
+    expect(applyLessonToImagePrompt(first, lesson)).toBe(first);
+    expect(applyLessonToImagePrompt(base, '').length).toBeLessThanOrEqual(4_000);
   });
 });

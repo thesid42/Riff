@@ -301,7 +301,7 @@ describe('creative composer', () => {
   it('blocks experiment start when restored headline copy exceeds 60 characters', () => {
     render(<PersonaWave campaign={campaign} headlines={['A'.repeat(61), 'A concise alternate']} creativeJobId={null}
       onClearCreative={() => {}} wave={null} onWave={() => {}} onCampaign={() => {}} />);
-    expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Run until target' }) as HTMLButtonElement).disabled).toBe(true);
     expect(screen.getAllByText('Shorten headlines to 60 characters or fewer in Campaign before starting.')).toHaveLength(2);
   });
 

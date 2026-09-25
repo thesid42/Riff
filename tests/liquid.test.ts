@@ -216,7 +216,31 @@ describe('OpenRouter Liquid adapter', () => {
     }
   });
 
-  it('accepts a clean wait and rejects any wait that includes hypothesis text or headlines', async () => {
+  it('clips a long local-planner explanation instead of failing headline suggestions', async () => {
+    const long = `${'The brief is complete enough to propose a first headline test. '.repeat(8)}Extra.`;
+    expect(long.length).toBeGreaterThan(300);
+    const result = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...decision, explanation: long }),
+    })).proposeExperiment(context);
+    expect(result.explanation.length).toBeGreaterThan(0);
+    expect(Array.from(result.explanation).length).toBeLessThanOrEqual(300);
+    expect(result.headlines).toEqual(decision.headlines);
+  });
+
+  it('accepts a missing or array explanation from the local VLM', async () => {
+    const { explanation: _ignored, ...without } = decision;
+    const missing = await client(async () => openRouterResponse({
+      content: JSON.stringify(without),
+    })).proposeExperiment(context);
+    expect(missing.explanation).toBe('The saved brief supports a first headline comparison.');
+
+    const listed = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...decision, explanation: ['The brief is complete.', 'A headline test can start.'] }),
+    })).proposeExperiment(context);
+    expect(listed.explanation).toBe('The brief is complete. A headline test can start.');
+  });
+
+  it('accepts a clean wait and strips leftover creative from a sloppy wait', async () => {
     const cleanWait: ExperimentDecision = {
       action: 'wait', explanation: 'The brief does not specify a campaign goal.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: [], needsNewCreative: false,
     };
@@ -228,11 +252,27 @@ describe('OpenRouter Liquid adapter', () => {
       { ...cleanWait, headlines: ['Built to Last'] },
       { ...cleanWait, needsNewCreative: true },
     ]) {
-      const invalidClient = client(async () => openRouterResponse({ content: JSON.stringify(malformed) }));
-      await expect(invalidClient.proposeExperiment(context)).rejects.toMatchObject({
-        code: 'response', message: 'Liquid wait decisions must not propose creative.',
-      });
+      const coerced = await client(async () => openRouterResponse({ content: JSON.stringify(malformed) })).proposeExperiment(context);
+      expect(coerced).toEqual(cleanWait);
     }
+  });
+
+  it('promotes a wait that includes 2 or 3 headlines into the next test', async () => {
+    const promoted = await client(async () => openRouterResponse({
+      content: JSON.stringify({
+        action: 'wait',
+        explanation: 'A closer desk crop may raise clicks.',
+        hypothesis: 'A tighter lunch-desk scene may help.',
+        headlines: ['Save time organizing design notes', 'Keep team feedback organized'],
+        evidenceIds: ['exp-1-variant-a'],
+        personaIds: [],
+        needsNewCreative: true,
+      }),
+    })).proposeExperiment(context);
+    expect(promoted.action).toBe('propose_test');
+    expect(promoted.headlines).toEqual(['Save time organizing design notes', 'Keep team feedback organized']);
+    expect(promoted.needsNewCreative).toBe(true);
+    expect(promoted.hypothesis).toContain('tighter lunch-desk');
   });
 
   it('counts trimmed Unicode code points and preserves the separate legacy stored-headline limit', () => {
@@ -270,16 +310,75 @@ describe('OpenRouter Liquid adapter', () => {
     await expect(multilingualClient.proposeExperiment(mixedLanguageContext)).resolves.toEqual(multilingual);
   });
 
-  it('accepts a 60-code-point Liquid headline and rejects 61 without truncating it', async () => {
+  it('accepts a 60-code-point Liquid headline and clips a longer one instead of failing', async () => {
     const exact: ExperimentDecision = { ...decision, headlines: ['A'.repeat(60), 'B'.repeat(60)] };
     const validClient = client(async () => openRouterResponse({ content: JSON.stringify(exact) }));
     await expect(validClient.proposeExperiment(context)).resolves.toEqual(exact);
 
     const overLimit: ExperimentDecision = { ...decision, headlines: ['A'.repeat(61), 'A second line'] };
-    const invalidClient = client(async () => openRouterResponse({ content: JSON.stringify(overLimit) }));
-    await expect(invalidClient.proposeExperiment(context)).rejects.toMatchObject({
-      code: 'response', message: 'Liquid headlines must be 2 or 3 unique, non-empty lines of up to 60 characters, without control or replacement characters.',
-    });
+    const clipped = await client(async () => openRouterResponse({ content: JSON.stringify(overLimit) })).proposeExperiment(context);
+    expect(clipped.headlines).toEqual(['A'.repeat(60), 'A second line']);
+  });
+
+  it('coerces messy local-VLM headlines into 2 or 3 unique clipped lines', async () => {
+    const objects = await client(async () => openRouterResponse({
+      content: JSON.stringify({
+        ...decision,
+        headlines: [
+          { headline: 'Save time organizing design feedback for small teams today now' },
+          { title: 'Keep team feedback organized' },
+          { text: 'Save time organizing design feedback for small teams today now' },
+        ],
+      }),
+    })).proposeExperiment(context);
+    expect(objects.headlines).toEqual([
+      'Save time organizing design feedback for small teams today',
+      'Keep team feedback organized',
+    ]);
+
+    const extras = await client(async () => openRouterResponse({
+      content: JSON.stringify({
+        ...decision,
+        headlines: [
+          'Organize feedback in less time',
+          'Keep team feedback organized',
+          'Save hours on design notes',
+          'A fourth unused line',
+        ],
+      }),
+    })).proposeExperiment(context);
+    expect(extras.headlines).toEqual([
+      'Organize feedback in less time',
+      'Keep team feedback organized',
+      'Save hours on design notes',
+    ]);
+
+    const listed = await client(async () => openRouterResponse({
+      content: JSON.stringify({
+        ...decision,
+        headlines: '1. Organize feedback in less time\n2. Keep team feedback organized',
+      }),
+    })).proposeExperiment(context);
+    expect(listed.headlines).toEqual(['Organize feedback in less time', 'Keep team feedback organized']);
+
+    const titled = await client(async () => openRouterResponse({
+      content: JSON.stringify({
+        action: decision.action,
+        explanation: decision.explanation,
+        hypothesis: decision.hypothesis,
+        titles: ['Organize feedback in less time', 'Keep team feedback organized'],
+        evidenceIds: decision.evidenceIds,
+        personaIds: decision.personaIds,
+        needsNewCreative: decision.needsNewCreative,
+      }),
+    })).proposeExperiment(context);
+    expect(titled.headlines).toEqual(decision.headlines);
+
+    const tooFew = await client(async () => openRouterResponse({
+      content: JSON.stringify({ ...decision, headlines: ['Only one line'] }),
+    })).proposeExperiment(context).catch(value => value as Error);
+    expect(tooFew).toBeInstanceOf(Error);
+    expect(tooFew.message).toBe('Liquid must return 2 or 3 final headlines of up to 60 characters each.');
   });
 
   it('accepts only supplied persona IDs, requires none for wait, and sends the persona whitelist', async () => {
@@ -293,10 +392,16 @@ describe('OpenRouter Liquid adapter', () => {
     await expect(validClient.proposeExperiment(withPersonas)).resolves.toEqual(targeted);
     expect(JSON.parse(requestBody?.messages[1].content as string).personas).toEqual(withPersonas.personas);
 
+    const waitWithPersona = await client(async () => openRouterResponse({
+      content: JSON.stringify({ action: 'wait', explanation: 'Too little data.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: ['us-chi-manager'], needsNewCreative: false }),
+    })).proposeExperiment(withPersonas);
+    expect(waitWithPersona).toEqual({
+      action: 'wait', explanation: 'Too little data.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: [], needsNewCreative: false,
+    });
+
     const fixtures = [
       { name: 'unsupplied persona', context: withPersonas, content: { ...decision, personaIds: ['not-supplied'] }, message: 'Liquid decision named personas that were not supplied.' },
       { name: 'persona without a whitelist', context, content: { ...decision, personaIds: ['us-chi-manager'] }, message: 'Liquid decision named personas that were not supplied.' },
-      { name: 'wait naming personas', context: withPersonas, content: { action: 'wait', explanation: 'Too little data.', hypothesis: '', headlines: [], evidenceIds: [], personaIds: ['us-chi-manager'], needsNewCreative: false }, message: 'Liquid wait decisions must not propose creative.' },
       { name: 'non-boolean creative flag', context: withPersonas, content: { ...decision, needsNewCreative: 'yes' }, message: 'Liquid decision needsNewCreative must be a boolean.' },
     ];
     for (const fixture of fixtures) {

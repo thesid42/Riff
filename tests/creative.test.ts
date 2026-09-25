@@ -90,7 +90,7 @@ describe('creative composer API', () => {
 
     const get = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` });
     expect(get.statusCode).toBe(200);
-    expect(get.json()).toMatchObject({ jobs: [] });
+    expect(get.json()).toMatchObject({ jobs: [], latestLesson: null });
     expect(get.json().imagePromptSuggestion).toBe(buildProductImagePrompt({ product: campaignInput.product, audience: campaignInput.audience }, 'hero'));
     expect(get.json().imagePromptSuggestion).toContain(campaignInput.product);
     expect(get.json().imagePromptSuggestion.length).toBeLessThanOrEqual(4_000);

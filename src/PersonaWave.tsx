@@ -3,7 +3,10 @@ import { LoaderCircle, Pause, Play, Plus, Users, X } from 'lucide-react';
 import type { Campaign } from '../shared/types.js';
 import type { DecisionRecord, WaveSnapshot } from '../shared/run.js';
 import { countHeadlineCharacters, HEADLINE_MAX_LENGTH, isValidHeadlineSet } from '../shared/headlines.js';
-import { DEFAULT_AGENT_COUNT, DEFAULT_CONCURRENCY, MAX_AGENT_COUNT, MAX_CONCURRENCY, MIN_AGENT_COUNT } from '../shared/run.js';
+import {
+  DEFAULT_AGENT_COUNT, DEFAULT_CONCURRENCY, DEFAULT_MAX_AUTO_ROUNDS, DEFAULT_SUCCESS_CLICK_RATE,
+  MAX_AGENT_COUNT, MAX_CONCURRENCY, MAX_MAX_AUTO_ROUNDS, MIN_AGENT_COUNT, MIN_MAX_AUTO_ROUNDS,
+} from '../shared/run.js';
 import {
   AGE_BANDS, DEVICES, HOUSEHOLDS, PERSONA_TEMPLATES, WORK_TYPES,
   filterPersonaCatalog, personaCatalog, type CustomPersonaInput, type PersonaTemplate,
@@ -32,6 +35,10 @@ async function postJson<T>(url: string, value: unknown): Promise<T> {
 
 function percent(value: number | null | undefined): string {
   return value != null && Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : '—';
+}
+
+function clickRateToPercent(rate: number): number {
+  return Math.max(1, Math.min(100, Math.round(rate * 100)));
 }
 
 function ms(value: number | null | undefined): string {
@@ -75,6 +82,8 @@ export default function PersonaWave({
   const countries = useMemo(() => [...new Set(catalog.map((persona) => persona.country))].sort(), [catalog]);
   const [agentCount, setAgentCount] = useState(wave?.agentCount ?? DEFAULT_AGENT_COUNT);
   const [concurrency, setConcurrency] = useState(wave?.concurrency ?? DEFAULT_CONCURRENCY);
+  const [targetPercent, setTargetPercent] = useState(clickRateToPercent(wave?.successClickRate ?? campaign.successClickRate ?? DEFAULT_SUCCESS_CLICK_RATE));
+  const [maxIterations, setMaxIterations] = useState(wave?.maxAutoRounds ?? campaign.maxAutoRounds ?? DEFAULT_MAX_AUTO_ROUNDS);
   const [profileMix, setProfileMix] = useState<string[]>([]);
   const [ageFilter, setAgeFilter] = useState('');
   const [countryFilter, setCountryFilter] = useState('');
@@ -113,6 +122,10 @@ export default function PersonaWave({
   useEffect(() => {
     if (wave?.agentCount) setAgentCount(wave.agentCount);
     if (wave?.concurrency) setConcurrency(wave.concurrency);
+    if (wave?.successClickRate != null) setTargetPercent(clickRateToPercent(wave.successClickRate));
+    else if (campaign.successClickRate != null) setTargetPercent(clickRateToPercent(campaign.successClickRate));
+    if (wave?.maxAutoRounds != null) setMaxIterations(wave.maxAutoRounds);
+    else if (campaign.maxAutoRounds != null) setMaxIterations(campaign.maxAutoRounds);
   // Live progress refreshes should not overwrite settings the user is preparing
   // for the next run. Sync only when switching campaigns or experiment runs.
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -125,6 +138,8 @@ export default function PersonaWave({
     try {
       const result = await postJson<{ wave: WaveSnapshot }>(`/api/campaigns/${encodeURIComponent(campaign.id)}/run`, {
         agentCount, concurrency, headlines: headlines.map((line) => line.trim()),
+        successClickRate: targetPercent / 100,
+        maxAutoRounds: maxIterations,
         ...(creativeJobId ? { creativeJobId } : {}),
         ...(profileMix.length && profileMix.length < catalog.length ? { profileMix } : {}),
       });
@@ -252,7 +267,7 @@ export default function PersonaWave({
           Audience <span>{selectedCount} selected</span>
         </button>
         <button type="button" role="tab" id="wave-settings-tab" tabIndex={setupTab === 'settings' ? 0 : -1} aria-controls="wave-settings-panel" aria-selected={setupTab === 'settings'} onKeyDown={moveSetupTab} onClick={() => setSetupTab('settings')}>
-          Run settings <span>{agentCount} agents · {concurrency} at once</span>
+          Run settings <span>{agentCount} agents · {targetPercent}% target · {maxIterations === 0 ? 'no cap' : `${maxIterations} max`}</span>
         </button>
       </div>
 
@@ -368,8 +383,18 @@ export default function PersonaWave({
             <input type="number" min={1} max={MAX_CONCURRENCY} value={concurrency} disabled={runtime === 'running' || busy}
               onChange={(event) => setConcurrency(Math.max(1, Math.min(MAX_CONCURRENCY, Number(event.target.value) || DEFAULT_CONCURRENCY)))} aria-label="Concurrent persona agents" />
           </label>
+          <label className="composer-field">
+            <span><b>Click-rate target</b><small>1–100%</small></span>
+            <input type="number" min={1} max={100} value={targetPercent} disabled={runtime === 'running' || busy}
+              onChange={(event) => setTargetPercent(Math.max(1, Math.min(100, Number(event.target.value) || clickRateToPercent(DEFAULT_SUCCESS_CLICK_RATE))))} aria-label="Click-rate target percent" />
+          </label>
+          <label className="composer-field">
+            <span><b>Max iterations</b><small>0 = no cap</small></span>
+            <input type="number" min={MIN_MAX_AUTO_ROUNDS} max={MAX_MAX_AUTO_ROUNDS} value={maxIterations} disabled={runtime === 'running' || busy}
+              onChange={(event) => setMaxIterations(Math.max(MIN_MAX_AUTO_ROUNDS, Math.min(MAX_MAX_AUTO_ROUNDS, Number(event.target.value) || 0)))} aria-label="Maximum loop iterations" />
+          </label>
         </div>
-        <p className="experiment-helper">Higher concurrency finishes sooner and uses more provider capacity at the same time.</p>
+        <p className="experiment-helper">The agent keeps testing until a variant hits the click-rate target. Set max iterations to cap automatic rounds, or leave 0 for no cap.</p>
       </div>
 
       <div className="experiment-run-row">
@@ -379,13 +404,27 @@ export default function PersonaWave({
             : runtime === 'paused'
               ? <button className="button button-primary" type="button" onClick={() => void resume()} disabled={busy} aria-busy={busy}><Play size={15} /> Resume</button>
               : <button className="button button-primary" type="button" onClick={() => void start()} disabled={busy || !validHeadlines} aria-busy={busy}>
-                {busy ? <LoaderCircle size={15} className="spin" /> : <Users size={15} />} Start wave
+                {busy ? <LoaderCircle size={15} className="spin" /> : <Users size={15} />} Run until target
               </button>}
         </div>
         {!validHeadlines && <p className="experiment-start-guidance" role="status">{hasOverlongHeadline
           ? `Shorten headlines to ${HEADLINE_MAX_LENGTH} characters or fewer in Campaign before starting.`
           : `Add 2–3 unique headlines of up to ${HEADLINE_MAX_LENGTH} characters in Campaign before starting.`}</p>}
       </div>
+      {wave?.loopContinuing && !wave.loopStatus && (
+        <p className="loop-status" role="status">
+          {wave.loopActive
+            ? 'Campaign agent is running. It will keep testing and improving until the click-rate target is met.'
+            : 'Review finished. The automatic loop is preparing the next round.'}
+        </p>
+      )}
+      {wave?.loopStatus && (
+        <p className={`loop-status loop-${wave.loopStatus.reason}`} role="status">
+          {wave.loopStatus.message}
+          {wave.loopStatus.bestClickRate != null && ` Best click rate ${percent(wave.loopStatus.bestClickRate)} against a ${percent(wave.loopStatus.threshold)} threshold, measured from ${wave.loopStatus.metricsSource}.`}
+          {wave.loopStatus.creativeNote && ` ${wave.loopStatus.creativeNote}`}
+        </p>
+      )}
 
       {error && <div className="alert alert-error" role="alert"><span>{error}</span></div>}
       {wave?.lastError && (progress?.failed ?? 0) > 0 && <div className="alert alert-error" role="alert"><span>{progress?.failed} {progress?.failed === 1 ? 'agent' : 'agents'} failed: {wave.lastError}</span></div>}

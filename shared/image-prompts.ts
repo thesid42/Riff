@@ -48,6 +48,21 @@ function physicalStaging(product: string): string {
   return 'Stage the complete intact product in a natural resting position with realistic connected parts and believable proportions.';
 }
 
+/** Append a saved experiment lesson so the next image or video can follow it. */
+export function applyLessonToImagePrompt(base: string, statement: string, maxLength = 4_000): string {
+  const lesson = statement.trim().replace(/[\p{Cc}\uFFFD]/gu, ' ').replace(/\s+/g, ' ');
+  if (!lesson) return base.trim().slice(0, maxLength).trim();
+  const marker = 'Apply this experiment learning to the next image or video:';
+  if (base.includes(marker) && base.includes(lesson)) return base.trim().slice(0, maxLength).trim();
+  const note = `${marker} ${lesson}`;
+  const prefix = base.trim();
+  const joined = prefix ? `${prefix} ${note}` : note;
+  if (joined.length <= maxLength) return joined;
+  const room = maxLength - note.length - 1;
+  if (room < 40) return note.slice(0, maxLength).trim();
+  return `${prefix.slice(0, room).trim()} ${note}`.slice(0, maxLength).trim();
+}
+
 function cleanContext(value: string, fallback: string, maxLength: number): string {
   const clean = value.trim().replace(/[\p{Cc}\uFFFD]/gu, ' ').replace(/\s+/g, ' ').slice(0, maxLength).trim();
   return clean || fallback;

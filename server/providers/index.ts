@@ -110,7 +110,8 @@ export function createProviders(env: NodeJS.ProcessEnv = process.env, fetchImpl:
 
 function value(input: string | undefined): string | undefined { return input?.trim() || undefined; }
 export const DEFAULT_SUCCESS_CLICK_RATE = 0.7;
-export const DEFAULT_MAX_AUTO_ROUNDS = 3;
+/** 0 means keep chaining rounds until the click-rate target, budget, or a manual pause. */
+export const DEFAULT_MAX_AUTO_ROUNDS = 0;
 
 /**
  * Reads the click-rate at which the auto-run loop stops early. Expressed as a fraction in
@@ -128,7 +129,7 @@ export function readSuccessClickRate(env: NodeJS.ProcessEnv = process.env): numb
 }
 
 export function readMaxAutoRounds(env: NodeJS.ProcessEnv = process.env): number {
-  return readIntegerSetting(env.MAX_AUTO_ROUNDS, DEFAULT_MAX_AUTO_ROUNDS, 1, 20, 'MAX_AUTO_ROUNDS');
+  return readIntegerSetting(env.MAX_AUTO_ROUNDS, DEFAULT_MAX_AUTO_ROUNDS, 0, 100, 'MAX_AUTO_ROUNDS');
 }
 
 /**

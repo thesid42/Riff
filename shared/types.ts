@@ -29,6 +29,10 @@ export interface Campaign {
   concurrency: number;
   headlines: string[];
   customPersonas: PersonaTemplate[];
+  /** Persisted click-rate target (0–1). Null means use the server default. */
+  successClickRate?: number | null;
+  /** Persisted auto-round cap. 0 means no cap. Null means use the server default. */
+  maxAutoRounds?: number | null;
   createdAt: string;
   updatedAt: string;
 }

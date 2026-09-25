@@ -309,7 +309,7 @@ const systemPrompt = 'You are a cautious campaign experiment planner. Return onl
 
 function stagePolicy(stage: ExperimentContext['stage']): string {
   if (stage === 'initial') return 'STAGE POLICY — INITIAL: When product, approved facts or claims, audience, and goal are present, propose a first controlled test. Historical performance observations are not required; do not wait solely because none exist.';
-  if (stage === 'review') return 'STAGE POLICY — REVIEW: If the existing test is below its minimum data threshold or has no usable performance observations, choose wait. Do not propose a pivot from insufficient results. If evidence is sufficient, any next step is still only a test proposal, never a declared winner.';
+  if (stage === 'review') return 'STAGE POLICY — REVIEW: A completed wave with persona evidence is enough to write a lesson and propose the next test. Prefer propose_test: keep or revise headlines from the evidence, and set needsNewCreative true when the next improvement should change the image or video. Choose wait only when the brief itself is missing product, audience, claims, or goal. The explanation is the lesson. Do not declare a winner.';
   if (stage === 'retest') return 'STAGE POLICY — RETEST: A changed audience may be tested using a supplied scoped lesson as a rationale. Propose a controlled test without claiming a winner or requiring performance observations from the new audience first. Keep all variants on that audience; if the compared creative concepts also differ, do not attribute an outcome to the audience alone.';
   return 'STAGE POLICY — UNSPECIFIED: Infer intent from the brief. A complete first-time brief with no existing experiment is initial and can support a first test without historical performance. An existing test under review with insufficient data should wait. A changed-audience retest can propose a controlled test from a scoped lesson without claiming a winner. Missing essential brief information means wait.';
 }
@@ -373,36 +373,51 @@ function validateContext(context: ExperimentContext): ExperimentContext {
 function validateDecision(value: unknown, suppliedEvidence: Set<string>, suppliedPersonas: Set<string>, brief: string): ExperimentDecision {
   const v = object(value, 'Liquid returned an invalid decision.');
   if (v.action !== 'wait' && v.action !== 'propose_test') throw new ProviderError('Liquid decision action is invalid.', 'response');
-  const explanation = boundedText(v.explanation, 'explanation', 300);
+  const explanation = clipBoundedText(
+    v.explanation ?? v.rationale ?? v.reason ?? v.summary,
+    'explanation',
+    300,
+    'The saved brief supports a first headline comparison.',
+  );
+  let action = v.action;
   let hypothesis: string;
   let headlines: string[];
-  if (v.action === 'wait') {
-    if (v.hypothesis !== '' || !Array.isArray(v.headlines) || v.headlines.length !== 0) throw new ProviderError('Liquid wait decisions must not propose creative.', 'response');
-    hypothesis = '';
-    headlines = [];
+  if (action === 'wait') {
+    const proposed = normalizeProposeHeadlines(firstHeadlineSource(v));
+    if (isValidHeadlineSet(proposed)) {
+      // Local VLMs often mark a follow-up test as wait while still returning headlines.
+      action = 'propose_test';
+      headlines = proposed;
+      hypothesis = clipBoundedText(v.hypothesis, 'hypothesis', 500, 'The latest wave supports a follow-up headline and creative test.');
+      if (hypothesis.length < 10) hypothesis = 'The latest wave supports a follow-up headline and creative test.';
+    } else {
+      hypothesis = '';
+      headlines = [];
+    }
   } else {
-    hypothesis = boundedText(v.hypothesis, 'hypothesis', 500);
+    hypothesis = clipBoundedText(v.hypothesis, 'hypothesis', 500);
     if (hypothesis.length < 10) throw new ProviderError('Liquid test hypothesis is too short.', 'response');
-    if (!Array.isArray(v.headlines) || v.headlines.length < 2 || v.headlines.length > 3 || v.headlines.some(item => typeof item !== 'string')) {
+    headlines = normalizeProposeHeadlines(firstHeadlineSource(v));
+    if (!isValidHeadlineSet(headlines)) {
       throw new ProviderError('Liquid must return 2 or 3 final headlines of up to 60 characters each.', 'response');
     }
-    headlines = v.headlines.map(item => (item as string).trim());
-    if (!isValidHeadlineSet(headlines)) {
-      throw new ProviderError('Liquid headlines must be 2 or 3 unique, non-empty lines of up to 60 characters, without control or replacement characters.', 'response');
-    }
-    if (hasLatinLetter(brief) && !hasNonLatinLetter(brief) && headlines.some(hasNonLatinLetter)) {
-      throw new ProviderError('Liquid headlines do not match the campaign brief language.', 'response');
-    }
   }
-  if (!Array.isArray(v.evidenceIds) || v.evidenceIds.length > 30 || v.evidenceIds.some(id => typeof id !== 'string' || !suppliedEvidence.has(id))) throw new ProviderError('Liquid decision cited evidence that was not supplied.', 'response');
+  if (action === 'propose_test' && hasLatinLetter(brief) && !hasNonLatinLetter(brief) && headlines.some(hasNonLatinLetter)) {
+    throw new ProviderError('Liquid headlines do not match the campaign brief language.', 'response');
+  }
+  const evidenceIds = Array.isArray(v.evidenceIds) ? v.evidenceIds : [];
+  if (evidenceIds.length > 30 || evidenceIds.some(id => typeof id !== 'string' || !suppliedEvidence.has(id))) throw new ProviderError('Liquid decision cited evidence that was not supplied.', 'response');
   // The JSON-object fallback path has no schema, so absent fields default to "all personas" and
   // "reuse creative"; present fields are held to the same rules as the strict schema.
-  const personaIds = v.personaIds ?? [];
+  const personaIds = action === 'wait' ? [] : (v.personaIds ?? []);
   if (!Array.isArray(personaIds) || personaIds.length > 40 || personaIds.some(id => typeof id !== 'string' || !suppliedPersonas.has(id))) throw new ProviderError('Liquid decision named personas that were not supplied.', 'response');
-  const needsNewCreative = v.needsNewCreative ?? false;
-  if (typeof needsNewCreative !== 'boolean') throw new ProviderError('Liquid decision needsNewCreative must be a boolean.', 'response');
-  if (v.action === 'wait' && (personaIds.length !== 0 || needsNewCreative)) throw new ProviderError('Liquid wait decisions must not propose creative.', 'response');
-  return { action: v.action, explanation, hypothesis, headlines, evidenceIds: [...new Set(v.evidenceIds as string[])], personaIds: [...new Set(personaIds as string[])], needsNewCreative };
+  let needsNewCreative = false;
+  if (action === 'propose_test') {
+    if (v.needsNewCreative === undefined || v.needsNewCreative === null) needsNewCreative = mentionsVisualImprovement(explanation, hypothesis);
+    else if (typeof v.needsNewCreative !== 'boolean') throw new ProviderError('Liquid decision needsNewCreative must be a boolean.', 'response');
+    else needsNewCreative = v.needsNewCreative;
+  }
+  return { action, explanation, hypothesis, headlines, evidenceIds: [...new Set(evidenceIds as string[])], personaIds: [...new Set(personaIds as string[])], needsNewCreative };
 }
 
 function hasLatinLetter(value: string): boolean {
@@ -487,6 +502,106 @@ function unitScore(value: unknown): number {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 0;
   return clampUnit(numeric > 1 && numeric <= 10 ? numeric / 10 : numeric);
+}
+
+function mentionsVisualImprovement(...parts: string[]): boolean {
+  return parts.some((part) => /\b(image|video|visual|photo|creative|scene|thumbnail)\b/i.test(part));
+}
+
+function flattenPlannerText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) return value.map(flattenPlannerText).filter(Boolean).join(' ');
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return flattenPlannerText(record.text ?? record.content ?? record.explanation ?? record.summary ?? '');
+  }
+  return '';
+}
+
+function firstHeadlineSource(value: Record<string, unknown>): unknown {
+  for (const key of ['headlines', 'titles', 'options', 'variants', 'headline']) {
+    const candidate = value[key];
+    if (candidate === undefined || candidate === null) continue;
+    if (Array.isArray(candidate) && candidate.length === 0) continue;
+    if (typeof candidate === 'string' && !candidate.trim()) continue;
+    return candidate;
+  }
+  return value.headlines;
+}
+
+function collectHeadlineValues(value: unknown): unknown[] {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (Array.isArray(parsed)) return parsed;
+      } catch { /* treat as ordinary copy */ }
+    }
+    const parts = trimmed
+      .split(/\r?\n+|\\n+|\s+\d+[.)]\s+|;\s+|\s+\|\s+/)
+      .map(part => part.replace(/^\d+[.)]\s*/, '').trim())
+      .filter(Boolean);
+    return parts.length ? parts : [trimmed];
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    if (Array.isArray(record.headlines)) return record.headlines;
+    if (Array.isArray(record.items)) return record.items;
+    const values = Object.values(record);
+    return values.length ? values : [];
+  }
+  return [value];
+}
+
+function flattenHeadlineItem(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  if (Array.isArray(value)) return flattenHeadlineItem(value[0]);
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return flattenHeadlineItem(record.headline ?? record.title ?? record.copy ?? record.text ?? record.content ?? record.summary ?? '');
+  }
+  return '';
+}
+
+function clipHeadline(value: unknown): string {
+  const clean = flattenHeadlineItem(value).replace(/[\p{Cc}\uFFFD]/gu, ' ').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  const units = Array.from(clean);
+  if (units.length <= HEADLINE_MAX_LENGTH) return clean;
+  const clipped = units.slice(0, HEADLINE_MAX_LENGTH).join('');
+  const breakAt = clipped.lastIndexOf(' ');
+  return (breakAt >= 20 ? clipped.slice(0, breakAt) : clipped).trim();
+}
+
+function normalizeProposeHeadlines(value: unknown): string[] {
+  const seen = new Set<string>();
+  const headlines: string[] = [];
+  for (const item of collectHeadlineValues(value)) {
+    const headline = clipHeadline(item);
+    if (!headline) continue;
+    const key = headline.toLocaleLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    headlines.push(headline);
+    if (headlines.length === 3) break;
+  }
+  return headlines;
+}
+
+function clipBoundedText(value: unknown, name: string, max: number, fallback?: string): string {
+  let clean = flattenPlannerText(value).replace(/\s+/g, ' ').trim();
+  if (!clean && fallback) clean = fallback;
+  if (!clean) throw new ProviderError(`${name} must be a non-empty string of at most ${max} characters.`, 'response');
+  const units = Array.from(clean);
+  if (units.length <= max) return clean;
+  const clipped = units.slice(0, max).join('');
+  const breakAt = Math.max(clipped.lastIndexOf('. '), clipped.lastIndexOf(' '));
+  return (breakAt >= Math.floor(max / 2) ? clipped.slice(0, breakAt) : clipped).trim();
 }
 
 function firstScalar(value: unknown): unknown {

@@ -3,7 +3,7 @@ import { AlertCircle, ArrowDownToLine, ImagePlus, LoaderCircle, Play, Plus, Refr
 import type { Campaign } from '../shared/types.js';
 import type { CreativeImageJob, CreativeVariantOutput, CreativeVideoOptions } from '../shared/creative.js';
 import { countHeadlineCharacters, HEADLINE_MAX_LENGTH, isStoredHeadlineSet, isValidHeadlineSet } from '../shared/headlines.js';
-import { buildProductImagePrompt, PRODUCT_IMAGE_COMPOSITIONS } from '../shared/image-prompts.js';
+import { applyLessonToImagePrompt, buildProductImagePrompt, PRODUCT_IMAGE_COMPOSITIONS } from '../shared/image-prompts.js';
 import CreativeMediaViewer from './CreativeMediaViewer.js';
 import AdImagePreview from './AdImagePreview.js';
 import { drawFinishedAd, finishedAdPngBlob, loadFinishedAdImage } from './ad-image.js';
@@ -47,6 +47,9 @@ interface ComposerState {
   generationError: string;
   reloadVersion: number;
   manualEditing: boolean;
+  latestLesson: { id: string; statement: string } | null;
+  lessonAppliedId: string | null;
+  generateAfterLesson: boolean;
 }
 
 const EMPTY_STATE: ComposerState = {
@@ -55,6 +58,7 @@ const EMPTY_STATE: ComposerState = {
   videoOptions: { durationSeconds: 5, resolution: 'hd', aspectRatio: '1:1', generateAudio: false, draft: true },
   planLoading: false, planError: '', decision: null, metadata: null, headlines: [], variantPrompts: [], headlinesTouched: false,
   generationLoading: false, generationError: '', reloadVersion: 0, manualEditing: false,
+  latestLesson: null, lessonAppliedId: null, generateAfterLesson: false,
 };
 
 interface ApiError extends Error { status?: number }
@@ -283,12 +287,13 @@ const IMAGE_DEADLINE_MS = 130_000;
 const VIDEO_DEADLINE_MS = 310_000;
 
 
-export default function CreativeComposer({ campaign, initialHeadlines, selectedCreativeJobId, onHeadlinesChange, onUseForExperiment }: {
+export default function CreativeComposer({ campaign, initialHeadlines, selectedCreativeJobId, onHeadlinesChange, onUseForExperiment, pendingLesson }: {
   campaign: Campaign;
   initialHeadlines?: string[];
   selectedCreativeJobId?: string | null;
   onHeadlinesChange?: (headlines: string[]) => void;
   onUseForExperiment?: (job: CreativeImageJob, headlines: string[]) => void;
+  pendingLesson?: { campaignId: string; id: string; statement: string; token: number } | null;
 }) {
   const [campaignStates, setCampaignStates] = useState<Record<string, ComposerState>>({});
   const [viewer, setViewer] = useState<ViewerGallery | null>(null);
@@ -314,6 +319,11 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
       onHeadlinesChangeRef.current?.(state.headlines);
     }
   }, [campaign.id, state.loadStatus, state.headlines, state.headlinesTouched]);
+
+  useEffect(() => {
+    if (!pendingLesson || pendingLesson.campaignId !== campaign.id) return;
+    applyLesson(pendingLesson);
+  }, [campaign.id, pendingLesson?.token]);
 
   function closeViewer() {
     viewerGeneration.current += 1;
@@ -344,12 +354,15 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
     const campaignId = campaign.id;
     const controller = new AbortController();
     updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'loading', loadError: '' }));
-    getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities>; headlines?: string[] }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal)
+    getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities>; headlines?: string[]; latestLesson?: { id: string; statement: string } | null }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal)
       .then((result) => {
         if (controller.signal.aborted) return;
         if (typeof result?.imagePromptSuggestion !== 'string' || !Array.isArray(result.jobs)) throw new Error('Creative settings could not be read.');
         const jobs = result.jobs.filter((job) => isCreativeJob(job, campaignId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
         const responseHeadlines = Array.isArray(result.headlines) ? result.headlines.filter((item) => typeof item === 'string') : undefined;
+        const latestLesson = result.latestLesson && typeof result.latestLesson.id === 'string' && typeof result.latestLesson.statement === 'string'
+          ? { id: result.latestLesson.id, statement: result.latestLesson.statement }
+          : null;
         updateCampaign(campaignId, (current) => {
           const headlines = restoredHeadlines(current.headlines, responseHeadlines, jobs, campaign, current.headlinesTouched);
           return {
@@ -363,6 +376,7 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
             headlines,
             variantPrompts: current.variantPrompts.length === headlines.length ? current.variantPrompts : defaultVariantPrompts(campaign, current.mediaType, headlines.length),
             capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true },
+            latestLesson,
           };
         });
       })
@@ -449,6 +463,24 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
     }
   }
 
+  function applyLesson(lesson: { id: string; statement: string }) {
+    updateCampaign(campaign.id, (current) => {
+      if (current.lessonAppliedId === lesson.id) return current;
+      const prompts = current.variantPrompts.length === current.headlines.length
+        ? current.variantPrompts
+        : defaultVariantPrompts(campaign, current.mediaType, current.headlines.length);
+      return {
+        ...current,
+        promptEdited: true,
+        imagePrompt: applyLessonToImagePrompt(current.imagePrompt || current.imagePromptSuggestion, lesson.statement),
+        variantPrompts: prompts.map((prompt) => applyLessonToImagePrompt(prompt, lesson.statement)),
+        lessonAppliedId: lesson.id,
+        generateAfterLesson: true,
+        generationError: '',
+      };
+    });
+  }
+
   async function refreshJobs() {
     const campaignId = campaign.id;
     const controller = new AbortController();
@@ -457,13 +489,16 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
     refreshControllers.current.set(campaignId, controller);
     updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'loading', loadError: '' }));
     try {
-      const result = await getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities>; headlines?: string[] }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal);
+      const result = await getJson<{ imagePromptSuggestion: string; jobs: CreativeImageJob[]; capabilities?: Partial<CreativeCapabilities>; headlines?: string[]; latestLesson?: { id: string; statement: string } | null }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal);
       if (typeof result?.imagePromptSuggestion !== 'string' || !Array.isArray(result.jobs)) throw new Error('Creative settings could not be read.');
       const jobs = result.jobs.filter((job) => isCreativeJob(job, campaignId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const latestLesson = result.latestLesson && typeof result.latestLesson.id === 'string' && typeof result.latestLesson.statement === 'string'
+        ? { id: result.latestLesson.id, statement: result.latestLesson.statement }
+        : null;
       updateCampaign(campaignId, (current) => {
         const restored = restoredHeadlines(current.headlines, result.headlines, jobs, campaign, current.headlinesTouched);
         const nextPrompts = current.variantPrompts.length === restored.length ? current.variantPrompts : defaultVariantPrompts(campaign, current.mediaType, restored.length);
-        return { ...current, loadStatus: 'ready', loadError: '', imagePromptSuggestion: result.imagePromptSuggestion, imagePrompt: current.promptEdited ? current.imagePrompt : result.imagePromptSuggestion, jobs, featuredJobId: current.featuredJobId ?? (current.generationLoading ? null : initialFeaturedJobId(jobs)), headlines: restored, variantPrompts: nextPrompts, capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true } };
+        return { ...current, loadStatus: 'ready', loadError: '', imagePromptSuggestion: result.imagePromptSuggestion, imagePrompt: current.promptEdited ? current.imagePrompt : result.imagePromptSuggestion, jobs, featuredJobId: current.featuredJobId ?? (current.generationLoading ? null : initialFeaturedJobId(jobs)), headlines: restored, variantPrompts: nextPrompts, capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true }, latestLesson };
       });
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -528,6 +563,26 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
       if (generationControllers.current.get(campaignId) === controller) generationControllers.current.delete(campaignId);
     }
   }
+
+  const generateImageRef = useRef(generateImage);
+  generateImageRef.current = generateImage;
+  const autoGenerateLessonRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!state.generateAfterLesson || !state.lessonAppliedId) return;
+    if (state.loadStatus !== 'ready' || state.generationLoading || state.planLoading) return;
+    if (autoGenerateLessonRef.current === state.lessonAppliedId) return;
+    if (!canGenerate) {
+      updateCampaign(campaign.id, (current) => ({
+        ...current,
+        generateAfterLesson: false,
+        generationError: current.generationError || 'This learning is ready, but headlines or directions need a fix before generation can start.',
+      }));
+      return;
+    }
+    autoGenerateLessonRef.current = state.lessonAppliedId;
+    updateCampaign(campaign.id, (current) => ({ ...current, generateAfterLesson: false }));
+    void generateImageRef.current();
+  }, [campaign.id, state.generateAfterLesson, state.lessonAppliedId, state.loadStatus, state.generationLoading, state.planLoading, canGenerate]);
 
   function openOriginalGallery(job: CreativeImageJob, versionIndex: number) {
     const token = ++viewerGeneration.current;
@@ -716,6 +771,15 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
           {state.manualEditing && <p className="composer-guidance" role="note">Manual draft — these headlines were not reviewed by Liquid. Keep them within the approved claims saved on this campaign: {campaign.approvedClaims.length ? campaign.approvedClaims.join(' · ') : 'no approved claims are saved; avoid product claims.'}</p>}
 
           <div className="composer-divider" />
+          {state.latestLesson && <div className="decision-note lesson-apply" role="status">
+            <strong>Latest experiment learning</strong>
+            <p>{state.latestLesson.statement}</p>
+            <button className="button button-secondary" type="button" onClick={() => applyLesson(state.latestLesson!)} disabled={editingDisabled || state.lessonAppliedId === state.latestLesson.id}>
+              {state.generationLoading && state.lessonAppliedId === state.latestLesson.id
+                ? `Generating next ${state.mediaType}…`
+                : state.lessonAppliedId === state.latestLesson.id ? `Generating from this learning` : `Generate next ${state.mediaType} from this learning`}
+            </button>
+          </div>}
           <div className="composer-step"><span>2</span><div><strong>Review {state.mediaType === 'video' ? 'video' : 'image'} directions</strong><small>Each editable version direction is submitted separately. BFL may interpret or expand it; generated media is a draft for human review.</small></div></div>
           <p className="composer-guidance">These directions are submitted as written. Change framing or motion while keeping product details grounded in the brief.</p>
           {state.mediaType === 'video' && state.capabilities.video && <div className="video-options">

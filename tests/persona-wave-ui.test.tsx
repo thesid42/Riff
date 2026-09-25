@@ -74,7 +74,7 @@ function WaveHarness({ initialCampaign = fixtureCampaign(), initialWave = null }
         setWave(null);
       }}>Switch campaign</button>
       <PersonaWave key={campaign.id} campaign={campaign} headlines={headlines} creativeJobId="creative-1"
-        onClearCreative={vi.fn()} wave={wave} onWave={setWave} onCampaign={vi.fn()} />
+        onClearCreative={vi.fn()} wave={wave} onWave={setWave} onCampaign={setCampaign} />
     </>
   );
 }
@@ -95,12 +95,12 @@ describe('persona experiment setup', () => {
     expect(screen.getByText(headlines[1])).toBeTruthy();
     expect(screen.getByText(/Creative attached: profiles will inspect each saved visual with its headline\./)).toBeTruthy();
     expect(screen.queryByText(/No creative is selected/)).toBeNull();
-    expect(screen.getByRole('button', { name: 'Start wave' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Start wave' }).hasAttribute('disabled')).toBe(false);
+    expect(screen.getByRole('button', { name: 'Run until target' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Run until target' }).hasAttribute('disabled')).toBe(false);
     expect(screen.getByRole('tab', { name: /Audience/ }).getAttribute('aria-selected')).toBe('true');
     expect(screen.getByRole('tab', { name: /Run settings/ }).getAttribute('aria-selected')).toBe('false');
     expect(screen.getByRole('tabpanel', { name: /Audience/ }).querySelectorAll('details')).toHaveLength(0);
-    expect(screen.queryByLabelText('Number of persona agents')).toBeNull();
+    expect(document.getElementById('wave-settings-panel')?.hidden).toBe(true);
     expect(screen.getByText('No wave run yet')).toBeTruthy();
   });
 
@@ -112,12 +112,14 @@ describe('persona experiment setup', () => {
     await user.click(screen.getByRole('tab', { name: /Run settings/ }));
     fireEvent.change(screen.getByLabelText('Number of persona agents'), { target: { value: '16' } });
     fireEvent.change(screen.getByLabelText('Concurrent persona agents'), { target: { value: '4' } });
-    await user.click(screen.getByRole('button', { name: 'Start wave' }));
+    fireEvent.change(screen.getByLabelText('Click-rate target percent'), { target: { value: '50' } });
+    fireEvent.change(screen.getByLabelText('Maximum loop iterations'), { target: { value: '5' } });
+    await user.click(screen.getByRole('button', { name: 'Run until target' }));
 
     await waitFor(() => expect(calls.some((call) => call.url.endsWith('/run'))).toBe(true));
     expect(calls.find((call) => call.url.endsWith('/run'))).toMatchObject({
       url: '/api/campaigns/campaign-1/run', method: 'POST',
-      body: { agentCount: 16, concurrency: 4, headlines, creativeJobId: 'creative-1' },
+      body: { agentCount: 16, concurrency: 4, headlines, creativeJobId: 'creative-1', successClickRate: 0.5, maxAutoRounds: 5 },
     });
     expect(await screen.findByRole('button', { name: 'Pause' })).toBeTruthy();
     expect(screen.getByText(/Headlines for the next wave/)).toBeTruthy();
@@ -172,7 +174,7 @@ describe('persona experiment setup', () => {
     expect(screen.getByText('9 of 9 agents complete')).toBeTruthy();
     expect(screen.queryByText('Mutable draft copy from campaign')).toBeNull();
     expect(screen.queryByText('This review belongs to an older wave.')).toBeNull();
-    expect(screen.getByRole('button', { name: 'Start wave' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Run until target' })).toBeTruthy();
     expect(screen.getByText('Detailed results', { exact: true }).closest('details')?.open).toBe(false);
   });
 
@@ -200,7 +202,7 @@ describe('persona experiment setup', () => {
     render(<WaveHarness />);
 
     await user.click(screen.getByRole('button', { name: /Add custom profile/ }));
-    const panel = screen.getByRole('tabpanel', { name: 'Audience' });
+    const panel = screen.getByRole('tabpanel', { name: /Audience/ });
     expect(panel.querySelectorAll('details')).toHaveLength(0);
     await user.type(screen.getByPlaceholderText('pharmacist'), 'architect');
     await user.type(screen.getByPlaceholderText('India'), 'Canada');

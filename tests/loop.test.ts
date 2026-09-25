@@ -95,11 +95,16 @@ describe('experiment loop', () => {
     return created.json().campaign.id as string;
   }
 
-  async function startWave(agentCount = 8, options: { id?: string; creativeJobId?: string; budgetCents?: number } = {}) {
+  async function startWave(agentCount = 8, options: { id?: string; creativeJobId?: string; budgetCents?: number; successClickRate?: number; maxAutoRounds?: number } = {}) {
     const id = options.id ?? await createCampaign(options.budgetCents);
     const started = await app.inject({
       method: 'POST', url: `/api/campaigns/${id}/run`,
-      payload: { agentCount, concurrency: 2, headlines, ...(options.creativeJobId ? { creativeJobId: options.creativeJobId } : {}) },
+      payload: {
+        agentCount, concurrency: 2, headlines,
+        ...(options.creativeJobId ? { creativeJobId: options.creativeJobId } : {}),
+        ...(options.successClickRate !== undefined ? { successClickRate: options.successClickRate } : {}),
+        ...(options.maxAutoRounds !== undefined ? { maxAutoRounds: options.maxAutoRounds } : {}),
+      },
     });
     expect(started.statusCode).toBe(200);
     return id;
@@ -137,6 +142,7 @@ describe('experiment loop', () => {
     await vi.waitFor(async () => {
       const details = await detailsFor(id);
       expect(details.wave.runtime).toBe('idle');
+      expect(details.wave.loopContinuing).toBe(false);
       expect(details.wave.loopStatus?.reason).toBe(reason);
     }, { timeout, interval: 100 });
     return detailsFor(id);
@@ -178,6 +184,19 @@ describe('experiment loop', () => {
     expect(details.lessons.length).toBeGreaterThanOrEqual(3);
   }, 20_000);
 
+  it('uses the click-rate target and max rounds sent with the wave', async () => {
+    app = loopApp(mockLiquid('skip', 'propose_test'), { maxAutoRounds: 10 });
+    const id = await startWave(8, { successClickRate: 0.99, maxAutoRounds: 1 });
+    const details = await waitForStop(id, 'round_cap');
+    expect(details.experiments).toHaveLength(1);
+    expect(details.campaign.successClickRate).toBe(0.99);
+    expect(details.campaign.maxAutoRounds).toBe(1);
+    expect(details.wave.successClickRate).toBe(0.99);
+    expect(details.wave.maxAutoRounds).toBe(1);
+    expect(details.wave.loopStatus?.threshold).toBe(0.99);
+    expect(details.wave.loopStatus?.maxRounds).toBe(1);
+  }, 15_000);
+
   it('stops as soon as a variant meets the click-rate threshold', async () => {
     app = createApp({
       databasePath: join(directory, 'campaigns.sqlite'),
@@ -215,6 +234,72 @@ describe('experiment loop', () => {
     expect(new Set(details.variants.map((variant: { headline: string }) => variant.headline))).toEqual(new Set(headlines));
     expect(bfl.submit).not.toHaveBeenCalled();
     expect((await roundsFor(id)).slice(0, 2).map((round) => round.creative)).toEqual(['text-only', 'text-only']);
+  }, 20_000);
+
+  it('writes a lesson from the wave even when Liquid review fails', async () => {
+    const liquid = mockLiquid('skip', 'propose_test');
+    liquid.proposeExperimentWithMetadata = vi.fn(async () => {
+      throw new Error('Liquid wait decisions must not propose creative.');
+    });
+    app = loopApp(liquid, { maxAutoRounds: 1 });
+    const id = await startWave();
+    const details = await waitForStop(id, 'review_failed');
+    expect(details.lessons).toHaveLength(1);
+    expect(details.lessons[0].statement).toMatch(/best click rate/i);
+    expect(details.lessons[0].experimentId).toBe(details.experiments[0].id);
+  }, 15_000);
+
+  it('backfills a missing lesson when campaign details are loaded', async () => {
+    const liquid = mockLiquid('skip', 'propose_test');
+    liquid.proposeExperimentWithMetadata = vi.fn(async () => {
+      throw new Error('Liquid wait decisions must not propose creative.');
+    });
+    app = loopApp(liquid, { maxAutoRounds: 1 });
+    const id = await startWave();
+    await waitForStop(id, 'review_failed');
+    const { DatabaseSync } = await import('node:sqlite');
+    const db = new DatabaseSync(join(directory, 'campaigns.sqlite'));
+    db.exec('DELETE FROM lessons');
+    expect((db.prepare('SELECT COUNT(*) AS count FROM lessons').get() as { count: number }).count).toBe(0);
+    db.close();
+    const restored = await detailsFor(id);
+    expect(restored.lessons).toHaveLength(1);
+    expect(restored.lessons[0].statement).toMatch(/After testing/);
+  }, 15_000);
+
+  it('saves a lesson when the reviewer returns a sloppy wait and still stops at the cap', async () => {
+    app = loopApp(mockLiquid('skip', () => ({
+      action: 'wait',
+      explanation: 'The jar photo did not stop the scroll for desk workers.',
+      hypothesis: 'A closer lunch-desk crop may raise clicks.',
+      headlines: ['Built to Last'],
+      evidenceIds: ['SEG-01'],
+      personaIds: [],
+      needsNewCreative: true,
+    })), { maxAutoRounds: 1 });
+    const id = await startWave();
+    const details = await waitForStop(id, 'round_cap');
+    expect(details.experiments).toHaveLength(1);
+    expect(details.lessons).toHaveLength(1);
+    expect(details.lessons[0].statement).toContain('desk workers');
+    expect(details.wave.latestDecision?.action).toBe('wait');
+  }, 15_000);
+
+  it('treats a wait that includes two headlines as the next automatic test', async () => {
+    app = loopApp(mockLiquid('skip', () => ({
+      action: 'wait',
+      explanation: 'A tighter desk scene may help.',
+      hypothesis: 'A closer lunch-desk crop may raise clicks.',
+      headlines: nextHeadlines,
+      evidenceIds: ['SEG-01'],
+      personaIds: [],
+      needsNewCreative: false,
+    })), { maxAutoRounds: 2 });
+    const id = await startWave();
+    const details = await waitForStop(id, 'round_cap');
+    expect(details.campaign.headlines).toEqual(nextHeadlines);
+    expect(details.experiments).toHaveLength(2);
+    expect(details.lessons.length).toBeGreaterThanOrEqual(1);
   }, 20_000);
 
   it('stops with threshold_met when Liquid waits but the click rate already clears the threshold', async () => {
@@ -271,16 +356,64 @@ describe('experiment loop', () => {
     expect((await roundsFor(id))[0]!.creative).toBe('new');
   }, 20_000);
 
-  it('stops with creative_failed and starts no round when generation fails', async () => {
+  it('keeps improving after image generation fails instead of stopping the agent', async () => {
     const bfl = mockBfl('Failed');
-    app = loopApp(mockLiquid('skip', () => ({ needsNewCreative: true })), { bfl });
+    app = loopApp(mockLiquid('skip', () => ({ needsNewCreative: true })), { bfl, maxAutoRounds: 2 });
     const id = await startWave();
-    const details = await waitForStop(id, 'creative_failed');
-
+    const details = await waitForStop(id, 'round_cap');
     expect(bfl.submit).toHaveBeenCalled();
-    expect(details.experiments).toHaveLength(1);
-    expect(details.wave.loopStatus.message).toContain('no round was started');
-  }, 15_000);
+    expect(details.experiments.length).toBeGreaterThanOrEqual(2);
+  }, 20_000);
+
+  it('keeps chaining rounds until a variant meets the click-rate target when no cap is set', async () => {
+    const liquid = mockLiquid('skip', 'propose_test');
+    let judged = 0;
+    liquid.judgeCreative = vi.fn(async () => {
+      judged += 1;
+      const action = judged > 16 ? 'click' as const : 'skip' as const;
+      return {
+        judgment: {
+          action,
+          reason: 'A scoped reason.',
+          dwellSeconds: 8,
+          timeToActionSeconds: 4,
+          confidence: 0.7,
+          attention: 0.6,
+          clarity: 0.8,
+          trust: 0.5,
+          purchaseIntent: 0.4,
+          noticedFirst: 'headline' as const,
+          friction: 'none' as const,
+        },
+        metadata: { elapsedMs: 120, usage: { promptTokens: 20, completionTokens: 30 } },
+      };
+    });
+    app = createApp({
+      databasePath: join(directory, 'campaigns.sqlite'),
+      providers: { liquid: liquid as never, analytics: mockAnalytics(), videoEnabled: false },
+      successClickRate: 0.7,
+      maxAutoRounds: 0,
+    });
+    const id = await startWave();
+    const details = await waitForStop(id, 'threshold_met', 25_000);
+    expect(details.experiments.length).toBeGreaterThanOrEqual(3);
+    expect(details.wave.loopActive).toBe(false);
+  }, 30_000);
+
+  it('resumes an unfinished campaign agent after recover', async () => {
+    app = loopApp(mockLiquid('skip', 'propose_test'), { maxAutoRounds: 3 });
+    const id = await startWave();
+    await vi.waitFor(async () => {
+      const details = await detailsFor(id);
+      expect(details.experiments.length).toBeGreaterThanOrEqual(1);
+      expect(details.wave.runtime).toBe('idle');
+      expect(details.wave.loopContinuing).toBe(true);
+    }, { timeout: 15_000, interval: 100 });
+    await app.close();
+    app = loopApp(mockLiquid('skip', 'propose_test'), { maxAutoRounds: 3 });
+    const details = await waitForStop(id, 'round_cap');
+    expect(details.experiments).toHaveLength(3);
+  }, 25_000);
 
   it('stops with rules_failed and keeps the tested headlines when a proposal cites an unapproved claim', async () => {
     app = loopApp(mockLiquid('skip', () => ({ headlines: ['Keeps drinks cold for 24 hours', 'A 750 ml bottle for the commute'] })));

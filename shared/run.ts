@@ -9,6 +9,12 @@ export const MAX_AGENT_COUNT = 1_000;
 export const DEFAULT_CONCURRENCY = 8;
 export const MAX_CONCURRENCY = 20;
 export const DEFAULT_OFFER = 'Join the waitlist';
+export const DEFAULT_SUCCESS_CLICK_RATE = 0.7;
+export const MIN_SUCCESS_CLICK_RATE = 0.01;
+export const MAX_SUCCESS_CLICK_RATE = 1;
+export const DEFAULT_MAX_AUTO_ROUNDS = 0;
+export const MIN_MAX_AUTO_ROUNDS = 0;
+export const MAX_MAX_AUTO_ROUNDS = 100;
 
 export const runWaveSchema = z.object({
   agentCount: z.number().int().min(MIN_AGENT_COUNT).max(MAX_AGENT_COUNT).default(DEFAULT_AGENT_COUNT),
@@ -16,6 +22,8 @@ export const runWaveSchema = z.object({
   creativeJobId: z.string().uuid().optional(),
   headlines: headlineSetSchema.optional(),
   profileMix: z.array(z.string().trim().min(1).max(80)).max(40).optional(),
+  successClickRate: z.number().min(MIN_SUCCESS_CLICK_RATE).max(MAX_SUCCESS_CLICK_RATE).optional(),
+  maxAutoRounds: z.number().int().min(MIN_MAX_AUTO_ROUNDS).max(MAX_MAX_AUTO_ROUNDS).optional(),
 }).strict();
 
 export type RunWaveInput = z.output<typeof runWaveSchema>;
@@ -153,6 +161,14 @@ export interface WaveSnapshot {
   reviewError: string | null;
   /** Why the auto-run loop stopped, so the UI can explain it instead of going quiet. */
   loopStatus: LoopStatus | null;
+  /** True while a chained round is scheduled or generating creative, even if runtime is idle. */
+  loopContinuing: boolean;
+  /** True while the campaign agent is still working toward the click-rate target. */
+  loopActive: boolean;
+  /** Effective click-rate target for this campaign (0–1). */
+  successClickRate: number;
+  /** Effective auto-round cap for this campaign. 0 means no cap. */
+  maxAutoRounds: number;
 }
 
 export type LoopStopReason = 'threshold_met' | 'round_cap' | 'paused' | 'review_failed' | 'rules_failed' | 'creative_failed';
@@ -189,6 +205,10 @@ export function emptyWaveSnapshot(agentCount = DEFAULT_AGENT_COUNT, concurrency 
     ingestError: null,
     reviewError: null,
     loopStatus: null,
+    loopContinuing: false,
+    loopActive: false,
+    successClickRate: DEFAULT_SUCCESS_CLICK_RATE,
+    maxAutoRounds: DEFAULT_MAX_AUTO_ROUNDS,
   };
 }
 

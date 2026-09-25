@@ -318,8 +318,9 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   }));
 
   app.get<{ Params: { id: string } }>('/api/campaigns/:id/lessons', async (request, reply) => {
-    if (!database.getCampaign(request.params.id)) return notFound(reply, 'Campaign');
-    return { lessons: database.listLessons(request.params.id) };
+    const campaign = database.getCampaign(request.params.id);
+    if (!campaign) return notFound(reply, 'Campaign');
+    return { lessons: runner.details(campaign).lessons };
   });
 
   app.get<{ Params: { id: string } }>('/api/campaigns/:id/experiments', async (request, reply) => {

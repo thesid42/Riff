@@ -29,11 +29,13 @@ function installApi(options: {
   integrations?: IntegrationStatus[];
   campaigns?: Campaign[];
   runResponse?: () => Promise<Response>;
+  lessons?: Record<string, Array<{ id: string; campaignId: string; statement: string; audience: string; offer: string; experimentId: string; evidenceIds: string[]; status: 'active'; createdAt: string }>>;
   creativeResponses?: Record<string, {
     imagePromptSuggestion: string;
     jobs: unknown[];
     headlines?: string[];
     capabilities?: { image?: boolean; video?: boolean };
+    latestLesson?: { id: string; statement: string } | null;
   }>;
 } = {}) {
   const calls: Array<{ url: string; method: string; body?: unknown }> = [];
@@ -53,6 +55,24 @@ function installApi(options: {
     }
     if (method === 'POST' && url === '/api/campaigns') return jsonResponse({ campaign });
     if (method === 'POST' && /^\/api\/campaigns\/[^/]+\/run$/.test(url)) return options.runResponse ? options.runResponse() : jsonResponse({ wave: emptyWaveSnapshot() });
+    const generateCampaign = campaigns.find((item) => url === `/api/campaigns/${item.id}/creative/images` || url === `/api/campaigns/${item.id}/creative/videos`);
+    if (method === 'POST' && generateCampaign) {
+      const payload = (body && typeof body === 'object') ? body as { headlines?: string[]; imagePrompt?: string; variantPrompts?: string[] } : {};
+      const headlines = payload.headlines ?? generateCampaign.headlines;
+      return jsonResponse({
+        job: {
+          id: 'lesson-generated-job', campaignId: generateCampaign.id, headlines,
+          imagePrompt: payload.imagePrompt ?? '', mediaType: url.endsWith('/videos') ? 'video' : 'image',
+          status: 'generating', imageUrl: null, videoUrl: null, videoOptions: null, error: null,
+          createdAt, updatedAt: createdAt, visualMode: 'distinct',
+          outputs: headlines.map((headline, index) => ({
+            id: `lesson-output-${index}`, index, headline,
+            imagePrompt: payload.variantPrompts?.[index] ?? '', status: 'generating',
+            imageUrl: null, videoUrl: null, error: null, createdAt, updatedAt: createdAt,
+          })),
+        },
+      });
+    }
     if (url === '/api/campaigns') return jsonResponse({ campaigns: options.campaigns ?? [] });
     if (url === '/api/integrations') return jsonResponse({ integrations: options.integrations ?? [] });
     const creativeCampaign = campaigns.find((item) => url === `/api/campaigns/${item.id}/creative`);
@@ -60,9 +80,10 @@ function installApi(options: {
       imagePromptSuggestion: `Product photography for ${creativeCampaign.product}.`, jobs: [],
     });
     const selectedCampaign = campaigns.find((item) => url === `/api/campaigns/${item.id}`);
-    if (selectedCampaign) return jsonResponse({ campaign: selectedCampaign, variants: [], experiments: [], lessons: [] });
+    if (selectedCampaign) return jsonResponse({ campaign: selectedCampaign, variants: [], experiments: [], lessons: options.lessons?.[selectedCampaign.id] ?? [], wave: emptyWaveSnapshot() });
     const metricsCampaign = campaigns.find((item) => url === `/api/campaigns/${item.id}/metrics`);
     if (metricsCampaign) return jsonResponse(emptyMetricsSnapshot(metricsCampaign.id));
+    if (campaigns.some((item) => url === `/api/campaigns/${item.id}/metrics/rounds`)) return jsonResponse({ rounds: [] });
     return jsonResponse({ error: { code: 'not_found', message: 'Unexpected request.' } }, 404);
   });
   vi.stubGlobal('fetch', fetchMock);
@@ -100,7 +121,7 @@ describe('Riff dashboard', () => {
     render(<App />);
     await screen.findByRole('button', { name: 'Generate 2 images' });
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
-    await user.click(screen.getByRole('button', { name: 'Start wave' }));
+    await user.click(screen.getByRole('button', { name: 'Run until target' }));
     await waitFor(() => expect(calls.some((call) => call.url.endsWith('/run'))).toBe(true));
     await user.selectOptions(screen.getByRole('combobox', { name: 'Choose campaign' }), second.id);
     await waitFor(() => expect(calls.some((call) => call.url === '/api/campaigns/campaign-2')).toBe(true));
@@ -246,18 +267,17 @@ describe('Riff dashboard', () => {
 
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
     expect(within(await screen.findByRole('list', { name: 'Headlines for the next wave' })).getByText(imageHeadlines[0])).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getByText('1 saved on this campaign')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Run until target' }) as HTMLButtonElement).disabled).toBe(false);
 
     await user.click(screen.getByRole('button', { name: 'Campaign', exact: true }));
     await user.click(screen.getByText('Versions', { exact: true }));
     await user.clear(screen.getByRole('textbox', { name: 'Version A headline' }));
     await user.type(screen.getByRole('textbox', { name: 'Version A headline' }), 'A different unsaved caption');
     await user.click(screen.getByRole('button', { name: 'Select for experiment' }));
-    expect(await screen.findByText(/A saved creative is selected for the next wave/)).toBeTruthy();
+    expect(await screen.findByText(/Creative attached: profiles will inspect each saved visual with its headline\./)).toBeTruthy();
     expect(within(screen.getByRole('list', { name: 'Headlines for the next wave' })).getByText(imageHeadlines[0])).toBeTruthy();
     expect(screen.queryByText('A different unsaved caption')).toBeNull();
-    await user.click(screen.getByRole('button', { name: 'Start wave' }));
+    await user.click(screen.getByRole('button', { name: 'Run until target' }));
     await waitFor(() => expect(calls.some((call) => call.method === 'POST' && call.url === '/api/campaigns/campaign-1/run')).toBe(true));
     expect(calls.find((call) => call.method === 'POST' && call.url === '/api/campaigns/campaign-1/run')?.body).toMatchObject({
       headlines: imageHeadlines,
@@ -278,7 +298,7 @@ describe('Riff dashboard', () => {
     await user.clear(screen.getByRole('textbox', { name: 'Version B headline' }));
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
     expect(await screen.findByText('Add 2–3 unique, non-empty headlines of up to 60 characters in Campaign before starting.')).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Run until target' }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.selectOptions(screen.getByRole('combobox', { name: 'Choose campaign' }), campaignTwo.id);
     await user.click(screen.getByRole('button', { name: 'Campaign', exact: true }));
@@ -289,6 +309,39 @@ describe('Riff dashboard', () => {
     expect(secondCampaignHeadline.value).not.toBe(editedHeadline);
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
     expect(within(await screen.findByRole('list', { name: 'Headlines for the next wave' })).getByText(videoHeadlines[0])).toBeTruthy();
-    expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole('button', { name: 'Run until target' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('generates the next image from a lesson in one click', async () => {
+    const campaign = fixtureCampaign({ headlines: ['Carry lunch without the leak', 'A 400 ml jar for the desk'] });
+    const lesson = {
+      id: 'lesson-desk', campaignId: campaign.id, statement: 'Desk workers skipped the wide product hero.',
+      audience: campaign.audience, offer: 'Buy now', experimentId: 'exp-1', evidenceIds: ['SEG-01'],
+      status: 'active' as const, createdAt,
+    };
+    const { calls } = installApi({
+      campaigns: [campaign],
+      lessons: { [campaign.id]: [lesson] },
+      creativeResponses: {
+        [campaign.id]: {
+          imagePromptSuggestion: 'Single steel lunch jar on a desk.',
+          jobs: [],
+          headlines: campaign.headlines,
+          latestLesson: { id: lesson.id, statement: lesson.statement },
+        },
+      },
+    });
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: 'Lessons' }));
+    expect(await screen.findByText(lesson.statement)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Generate next image or video' }));
+    expect(await screen.findByRole('heading', { name: 'Build a creative concept' })).toBeTruthy();
+    await waitFor(() => expect(calls.some((call) => call.method === 'POST' && call.url === `/api/campaigns/${campaign.id}/creative/images`)).toBe(true));
+    const generate = calls.find((call) => call.method === 'POST' && call.url === `/api/campaigns/${campaign.id}/creative/images`);
+    expect(generate?.body).toMatchObject({ headlines: campaign.headlines });
+    expect(String((generate?.body as { imagePrompt?: string })?.imagePrompt)).toContain(lesson.statement);
+    expect(((generate?.body as { variantPrompts?: string[] })?.variantPrompts ?? []).every((prompt) => prompt.includes(lesson.statement))).toBe(true);
+    expect(await screen.findByRole('button', { name: /Generating from this learning|Generating next image/ })).toBeTruthy();
   });
 });
