@@ -12,7 +12,7 @@ import type { Campaign, Experiment, Lesson, MetricsSnapshot, Variant } from '../
 import { emptyMetricsSnapshot } from '../shared/types.js';
 import type { CampaignDatabase } from './database.js';
 import { ProviderError, type AnalyticsClient, type AnalyticsEvent, type LiquidClient } from './providers/index.js';
-import { deciderSpeed, eventCost, jobProgress, lastJobError, segmentMetrics, signupSeries, totalsFromJobs, variantTotals } from './wave-metrics.js';
+import { deciderSpeed, eventCost, jobProgress, lastJobError, latestJudgmentAt, segmentMetrics, signupSeries, totalsFromJobs, variantTotals } from './wave-metrics.js';
 
 export class RunServiceError extends Error {
   constructor(readonly statusCode: number, readonly code: string, message: string) {
@@ -85,7 +85,7 @@ export class ExperimentRunService {
       source: this.options.analytics?.provider ?? 'none',
       status: succeeded.length ? 'available' : 'not_started',
       window: { label: experiment ? 'Current wave' : 'All time', start: experiment?.windowStart ?? null, end: experiment?.windowEnd ?? null },
-      updatedAt: succeeded.at(-1)?.finishedAt ?? null,
+      updatedAt: latestJudgmentAt(succeeded),
       totals: totalsFromJobs(jobs),
       variants: variantTotals(jobs),
       series: signupSeries(jobs),
@@ -97,7 +97,7 @@ export class ExperimentRunService {
 
   persistHeadlines(campaign: Campaign, headlines: string[]): Campaign {
     const parsed = headlineSetSchema.safeParse(headlines);
-    if (!parsed.success) throw new RunServiceError(400, 'validation_error', 'Provide 2 or 3 unique headlines.');
+    if (!parsed.success) throw new RunServiceError(400, 'validation_error', 'Provide 2 or 3 unique headlines, each no longer than 60 characters.');
     if (campaign.runtime === 'running') throw new RunServiceError(409, 'wave_active', 'Headlines cannot change while a wave is running.');
     return this.options.database.setHeadlines(campaign.id, parsed.data, new Date().toISOString()) ?? campaign;
   }
@@ -112,7 +112,7 @@ export class ExperimentRunService {
     if (!this.options.analytics) throw new RunServiceError(503, 'analytics_unavailable', 'Analytics is not configured.');
     if (campaign.runtime === 'running') throw new RunServiceError(409, 'wave_active', 'This draft already has a persona wave running.');
     const headlines = headlineSetSchema.safeParse(input.headlines?.length ? input.headlines : campaign.headlines);
-    if (!headlines.success) throw new RunServiceError(400, 'headlines_required', 'Ask Liquid for headlines, or enter 2 or 3 unique headlines, before starting a wave.');
+    if (!headlines.success) throw new RunServiceError(400, 'headlines_required', 'Ask Liquid for headlines, or enter 2 or 3 unique headlines no longer than 60 characters each, before starting a wave.');
     const now = new Date().toISOString();
     this.options.database.setHeadlines(campaign.id, headlines.data, now);
     const experiment = this.options.database.createExperiment({

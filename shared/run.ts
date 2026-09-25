@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { headlineSetSchema } from './headlines.js';
+
+export { headlineSetSchema } from './headlines.js';
 
 export const DEFAULT_AGENT_COUNT = 40;
 export const MIN_AGENT_COUNT = 8;
@@ -6,9 +9,6 @@ export const MAX_AGENT_COUNT = 1_000;
 export const DEFAULT_CONCURRENCY = 8;
 export const MAX_CONCURRENCY = 20;
 export const DEFAULT_OFFER = 'Join the waitlist';
-
-export const headlineSetSchema = z.array(z.string().trim().min(1).max(120)).min(2).max(3)
-  .refine((values) => new Set(values.map((value) => value.toLocaleLowerCase())).size === values.length, 'Headlines must be unique.');
 
 export const runWaveSchema = z.object({
   agentCount: z.number().int().min(MIN_AGENT_COUNT).max(MAX_AGENT_COUNT).default(DEFAULT_AGENT_COUNT),

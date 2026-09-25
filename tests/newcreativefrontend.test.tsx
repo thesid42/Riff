@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import CreativeComposer from '../src/CreativeComposer.js';
+import PersonaWave from '../src/PersonaWave.js';
 import type { Campaign } from '../shared/types.js';
 import type { CreativeImageJob, CreativeVariantOutput } from '../shared/creative.js';
 
@@ -21,6 +22,7 @@ function job(overrides: Partial<CreativeImageJob> = {}): CreativeImageJob {
 }
 
 interface Submission { requestId: string; headlines: string[]; imagePrompt: string; variantPrompts: string[] }
+let canvasSupportCleanup: (() => void) | null = null;
 
 function output(overrides: Partial<CreativeVariantOutput> = {}) {
   return {
@@ -86,7 +88,53 @@ function installFetch(options: {
   return calls;
 }
 
-afterEach(() => { cleanup(); document.body.style.overflow = ''; localStorage.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+afterEach(() => { cleanup(); canvasSupportCleanup?.(); canvasSupportCleanup = null; document.body.style.overflow = ''; localStorage.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+function installCanvasPreviewSupport(deferDecodeAt = -1) {
+  const urlsCreated: string[] = [];
+  const urlsRevoked: string[] = [];
+  let decodeCount = 0;
+  let resolveDeferredDecode: (() => void) | null = null;
+  const context = {
+    fillRect: vi.fn(), drawImage: vi.fn(), beginPath: vi.fn(), roundRect: vi.fn(), rect: vi.fn(), fill: vi.fn(), fillText: vi.fn(),
+    measureText: (text: string) => ({ width: Array.from(text).length * 20 }),
+    fillStyle: '', font: '', textAlign: 'left', textBaseline: 'top',
+  } as unknown as CanvasRenderingContext2D;
+  const previousGetContext = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'getContext');
+  const previousToBlob = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, 'toBlob');
+  Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', { configurable: true, value: () => context });
+  Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', { configurable: true, value: (callback: BlobCallback) => callback(new Blob(['finished-ad'], { type: 'image/png' })) });
+  vi.stubGlobal('CanvasRenderingContext2D', class CanvasRenderingContext2DMock {});
+  vi.stubGlobal('Image', class ImageMock {
+    naturalWidth = 800;
+    naturalHeight = 800;
+    decoding = 'async';
+    src = '';
+    decode() {
+      decodeCount += 1;
+      if (decodeCount === deferDecodeAt) return new Promise<void>((resolve) => { resolveDeferredDecode = resolve; });
+      return Promise.resolve();
+    }
+  });
+  const NativeURL = URL;
+  const MockURL = class extends NativeURL {};
+  Object.assign(MockURL, {
+    createObjectURL: vi.fn(() => {
+      const url = `blob:finished-ad-${urlsCreated.length + 1}`;
+      urlsCreated.push(url);
+      return url;
+    }),
+    revokeObjectURL: vi.fn((url: string) => { urlsRevoked.push(url); }),
+  });
+  vi.stubGlobal('URL', MockURL);
+  canvasSupportCleanup = () => {
+    if (previousGetContext) Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', previousGetContext);
+    else Reflect.deleteProperty(HTMLCanvasElement.prototype, 'getContext');
+    if (previousToBlob) Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', previousToBlob);
+    else Reflect.deleteProperty(HTMLCanvasElement.prototype, 'toBlob');
+  };
+  return { urlsCreated, urlsRevoked, resolveDeferredDecode: () => resolveDeferredDecode?.() };
+}
 
 async function expandSavedDrafts() {
   const title = await screen.findByText('Saved creative drafts', { exact: true });
@@ -125,17 +173,18 @@ describe('creative composer', () => {
     const defaults = ['A', 'B', 'C'].map((version) => (screen.getByRole('textbox', { name: `Version ${version} visual direction` }) as HTMLTextAreaElement).value);
     for (const prompt of defaults) {
       expect(prompt).toContain('750 ml bottle');
-      expect(prompt).toContain('neutral seamless studio backdrop');
-      expect(prompt).toContain('Soft diffused key and fill lighting');
-      expect(prompt).toContain('one complete product');
-      expect(prompt).toContain('each described pattern, material, and detail only on its named component');
-      expect(prompt).toContain('photography-only image');
+      expect(prompt).toContain('named colors, materials, and patterns on their named parts');
+      expect(prompt).toMatch(/plain and unbranded/i);
+      expect(prompt).toContain('Photography only');
+      expect(prompt).toContain('Composition:');
+      expect(prompt).toContain('Style:');
+      expect(prompt).toContain('Lighting:');
       expect(prompt.length).toBeLessThanOrEqual(4_000);
     }
     expect(new Set(defaults).size).toBe(3);
     expect(defaults[0]).toMatch(/three-quarter hero/i);
-    expect(defaults[1]).toMatch(/wider off-center/i);
-    expect(defaults[2]).toMatch(/closer alternate/i);
+    expect(defaults[1]).toMatch(/setting relevant to First-time visitors/i);
+    expect(defaults[2]).toMatch(/elevated three-quarter tabletop view/i);
 
     const customDirection = `${defaults[0]} Add a subtle shift to the camera angle.`;
     fireEvent.change(screen.getByRole('textbox', { name: 'Version A visual direction' }), { target: { value: customDirection } });
@@ -144,10 +193,8 @@ describe('creative composer', () => {
     expect((screen.getByRole('textbox', { name: 'Version A visual direction' }) as HTMLTextAreaElement).value).toBe(customDirection);
 
     fireEvent.click(screen.getByRole('button', { name: 'Generate 3 images' }));
-    await screen.findByText('1 ready');
-    const gallery = await expandSavedDrafts();
-    expect(gallery.open).toBe(true);
-    expect(screen.getByText('3 of 3 separate visuals ready')).toBeTruthy();
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    expect(within(latest).getByText('3 of 3 separate visuals ready')).toBeTruthy();
 
     const imageCall = calls.find((call) => call.url.endsWith('/creative/images'));
     expect(imageCall).toBeDefined();
@@ -159,14 +206,14 @@ describe('creative composer', () => {
     expect(body.variantPrompts).toEqual([customDirection, defaults[1], defaults[2]]);
     expect((screen.getByRole('textbox', { name: 'Version A visual direction' }) as HTMLTextAreaElement).value).toBe(customDirection);
     expect(screen.getByText('Uses BFL credits · 3 separate image requests, one per version')).toBeTruthy();
-    const previews = screen.getAllByRole('img', { name: /Generated image draft for Version/ });
+    const previews = within(latest).getAllByRole('img', { name: /Portrait ad preview for Version/ });
     expect(previews).toHaveLength(3);
-    expect(previews[0].getAttribute('src')).toBe('/api/creative-assets/creative-output-1');
-    expect(previews[1].getAttribute('src')).toBe('/api/creative-assets/creative-output-2');
-    expect(previews[2].getAttribute('src')).toBe('/api/creative-assets/creative-output-3');
-    expect(screen.getAllByText('Join the waitlist')).toHaveLength(3);
+    expect(latest.querySelectorAll('img.image-ad-source')).toHaveLength(0);
+    expect(latest.querySelectorAll('.mock-cta')).toHaveLength(0);
+    expect(latest.querySelectorAll('.finished-ad-description')).toHaveLength(3);
+    expect(latest.querySelector('.finished-ad-description')?.textContent).toContain('Join the waitlist');
 
-    const savedDirection = [...document.querySelectorAll<HTMLElement>('.image-job .job-direction summary')]
+    const savedDirection = [...latest.querySelectorAll<HTMLElement>('.image-job .job-direction summary')]
       .find((summary) => summary.textContent === 'Version A direction');
     expect(savedDirection).toBeDefined();
     fireEvent.click(savedDirection!);
@@ -175,7 +222,8 @@ describe('creative composer', () => {
 
   it('hydrates valid legacy headlines and enables generation without requiring Liquid provenance', async () => {
     const legacy = job({ headlines: ['Saved headline one', 'Saved headline two'] });
-    installFetch({ jobs: [legacy] });
+    const older = job({ id: 'older-job', headlines: ['Older saved headline one', 'Older saved headline two'], createdAt: '2026-09-24T18:00:00.000Z', updatedAt: '2026-09-24T18:00:00.000Z' });
+    installFetch({ jobs: [legacy, older] });
     render(<CreativeComposer campaign={campaign} />);
     const generate = await screen.findByRole('button', { name: 'Generate 2 images' });
     expect((generate as HTMLButtonElement).disabled).toBe(false);
@@ -184,14 +232,70 @@ describe('creative composer', () => {
     expect(screen.getByText('Headlines and visual directions')).toBeTruthy();
     await expandVersions();
     expect((screen.getByRole('textbox', { name: 'Version A headline' }) as HTMLInputElement).value).toBe('Saved headline one');
+    const latest = screen.getByRole('region', { name: 'Latest creative' });
+    expect(within(latest).getByRole('button', { name: 'View image for Version A' })).toBeTruthy();
     const summaryTitle = screen.getByText('Saved creative drafts', { exact: true });
     const closedGallery = summaryTitle.closest('details');
     expect(closedGallery?.open).toBe(false);
-    expect(screen.getByRole('button', { name: 'View image for Version A' }).closest('details')).toBe(closedGallery);
     const gallery = await expandSavedDrafts();
     expect(gallery.open).toBe(true);
-    expect(screen.getByText('One shared visual across versions')).toBeTruthy();
-    expect(screen.getAllByText('Review before use · shared image')).toHaveLength(2);
+    expect(within(latest).getByText('One shared visual across versions')).toBeTruthy();
+    expect(within(gallery).getByRole('button', { name: 'View image for Version A' })).toBeTruthy();
+    expect(within(gallery).getByText('Older saved headline one')).toBeTruthy();
+    expect(within(gallery).queryByText('Saved headline one')).toBeNull();
+    expect(latest.querySelectorAll('.finished-ad-preview')).toHaveLength(2);
+  });
+
+  it('keeps over-limit legacy captions editable and blocks generation until shortened', async () => {
+    const longLegacyHeadline = 'A'.repeat(61);
+    const legacy = job({ headlines: [longLegacyHeadline, 'A saved alternate headline'] });
+    installFetch({ jobs: [legacy] });
+    render(<CreativeComposer campaign={campaign} />);
+
+    const generate = await screen.findByRole('button', { name: 'Generate 2 images' }) as HTMLButtonElement;
+    expect(generate.disabled).toBe(true);
+    const versions = screen.getByText('Versions', { exact: true }).closest('details');
+    await waitFor(() => expect(versions?.open).toBe(true));
+    expect(screen.getByText('Use 2–3 unique headlines, up to 60 characters each. Remove control characters and open Versions to fix them.')).toBeTruthy();
+
+    const headlineInput = screen.getByRole('textbox', { name: 'Version A headline' }) as HTMLInputElement;
+    expect(headlineInput.value).toBe(longLegacyHeadline);
+    expect(headlineInput.hasAttribute('maxlength')).toBe(false);
+    expect(headlineInput.getAttribute('aria-invalid')).toBe('true');
+    expect(screen.getByText('61/60')).toBeTruthy();
+    expect(screen.getByText('Shorten this headline to 60 characters or fewer.')).toBeTruthy();
+
+    fireEvent.change(headlineInput, { target: { value: 'A shorter saved headline' } });
+    await waitFor(() => expect(generate.disabled).toBe(false));
+
+    const latest = screen.getByRole('region', { name: 'Latest creative' });
+    expect(within(latest).getByRole('img', { name: 'Portrait ad preview for Version A' })).toBeTruthy();
+    expect(screen.getAllByText(longLegacyHeadline)).toHaveLength(1);
+    const select = within(latest).getByRole('button', { name: 'Select for experiment' }) as HTMLButtonElement;
+    expect(select.disabled).toBe(true);
+    expect(screen.getByText('Saved captions exceed the current 60-character limit and cannot be attached to an experiment.')).toBeTruthy();
+  });
+
+  it('counts Unicode code points at the 60-character boundary without truncating UTF-16 input', async () => {
+    const exactlySixtyCharacters = `${'A'.repeat(59)}😀`;
+    const stored = ['A concise alternate', exactlySixtyCharacters];
+    const legacy = job({ headlines: stored });
+    installFetch({ jobs: [legacy] });
+    render(<CreativeComposer campaign={campaign} />);
+
+    const generate = await screen.findByRole('button', { name: 'Generate 2 images' }) as HTMLButtonElement;
+    expect(generate.disabled).toBe(false);
+    const headlineInput = screen.getByRole('textbox', { name: 'Version B headline' }) as HTMLInputElement;
+    expect(headlineInput.value).toBe(exactlySixtyCharacters);
+    expect(headlineInput.hasAttribute('maxlength')).toBe(false);
+    expect(screen.getByText('60/60')).toBeTruthy();
+  });
+
+  it('blocks experiment start when restored headline copy exceeds 60 characters', () => {
+    render(<PersonaWave campaign={campaign} headlines={['A'.repeat(61), 'A concise alternate']} creativeJobId={null}
+      onClearCreative={() => {}} wave={null} onWave={() => {}} onCampaign={() => {}} />);
+    expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getAllByText('Shorten headlines to 60 characters or fewer in Campaign before starting.')).toHaveLength(2);
   });
 
   it('opens Versions for manual entry and keeps hidden invalid-field guidance visible', async () => {
@@ -263,11 +367,10 @@ describe('creative composer', () => {
     });
     installFetch({ jobs: [partial] });
     render(<CreativeComposer campaign={{ ...campaign, headlines: partial.headlines }} />);
-    expect(await screen.findByText('1 need attention')).toBeTruthy();
-    await expandSavedDrafts();
-    expect(await screen.findByRole('button', { name: 'View image for Version A' })).toBeTruthy();
-    expect(screen.getByText('1 of 2 separate visuals ready')).toBeTruthy();
-    expect(screen.getByText('Provider could not finish.')).toBeTruthy();
+    const latest = screen.getByRole('region', { name: 'Latest creative' });
+    expect(await within(latest).findByRole('button', { name: 'View image for Version A' })).toBeTruthy();
+    expect(within(latest).getByText('1 of 2 separate visuals ready')).toBeTruthy();
+    expect(await within(latest).findByText('Provider could not finish.')).toBeTruthy();
   });
 
   it('keeps video disabled when the server capability is off and exposes invalid Liquid output without a paid call', async () => {
@@ -285,8 +388,8 @@ describe('creative composer', () => {
     const calls = installFetch({ jobs: [job()] });
     document.body.style.overflow = 'clip';
     render(<CreativeComposer campaign={campaign} />);
-    await expandSavedDrafts();
-    const openButton = await screen.findByRole('button', { name: 'View image for Version A' });
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    const openButton = within(latest).getByRole('button', { name: 'View image for Version A' });
     openButton.focus();
     fireEvent.click(openButton);
 
@@ -296,13 +399,27 @@ describe('creative composer', () => {
     const image = dialog.querySelector('img');
     expect(image?.getAttribute('src')).toBe('/api/creative-assets/creative-job-1');
     expect(image?.getAttribute('alt')).toContain('Version A');
+    const previous = screen.getByRole('button', { name: 'Previous version' }) as HTMLButtonElement;
+    const next = screen.getByRole('button', { name: 'Next version' }) as HTMLButtonElement;
+    expect(previous.disabled).toBe(true);
+    expect(next.disabled).toBe(false);
     const original = screen.getByRole('link', { name: /Open original/ });
     expect(original.getAttribute('target')).toBe('_blank');
     expect(original.getAttribute('rel')).toContain('noopener');
+    next.focus();
     fireEvent.keyDown(dialog, { key: 'Tab', shiftKey: true });
     expect(document.activeElement).toBe(original);
+    original.focus();
     fireEvent.keyDown(dialog, { key: 'Tab' });
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close media viewer' }));
+    expect(document.activeElement).toBe(next);
+
+    fireEvent.click(next);
+    expect(dialog.querySelector('h2')?.textContent).toBe('Version B image draft');
+    expect(dialog.querySelector('img')?.getAttribute('alt')).toContain('Version B');
+    expect(screen.getByText('2 of 2')).toBeTruthy();
+    expect((screen.getByRole('button', { name: 'Next version' }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(previous);
+    expect(dialog.querySelector('h2')?.textContent).toBe('Version A image draft');
 
     fireEvent.keyDown(dialog, { key: 'Escape' });
     expect(screen.queryByRole('dialog')).toBeNull();
@@ -322,8 +439,8 @@ describe('creative composer', () => {
     });
     const calls = installFetch({ jobs: [videoJob], videoEnabled: true });
     render(<CreativeComposer campaign={campaign} />);
-    const gallery = await expandSavedDrafts();
-    const openButton = await screen.findByRole('button', { name: 'Watch video for Version A' });
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    const openButton = within(latest).getByRole('button', { name: 'Watch video for Version A' });
     openButton.focus();
     fireEvent.click(openButton);
 
@@ -342,17 +459,76 @@ describe('creative composer', () => {
     expect(document.activeElement).toBe(openButton);
     expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
 
-    const pause = vi.mocked(HTMLMediaElement.prototype.pause);
-    const pausesBeforeCollapse = pause.mock.calls.length;
-    fireEvent.click(gallery.querySelector('summary')!);
-    expect(gallery.open).toBe(false);
-    expect(screen.getByRole('button', { name: 'Watch video for Version A' }).closest('details')).toBe(gallery);
-    if (pause.mock.calls.length > pausesBeforeCollapse) return;
-    try {
-      await waitFor(() => expect(pause.mock.calls.length).toBeGreaterThan(pausesBeforeCollapse), { timeout: 250 });
-    } catch {
-      // jsdom does not consistently dispatch native details toggle events; open=false above
-      // still verifies that the inline controls are behind the closed disclosure.
-    }
+  });
+
+  it('pins the accepted generation, exposes ready partial output immediately, and updates it during polling without opening the archive', async () => {
+    const acceptedJob = job({
+      id: 'accepted-latest', status: 'generating', visualMode: 'distinct', imageUrl: null,
+      headlines: ['First approved headline', 'Second approved headline'],
+      outputs: [
+        output({ id: 'accepted-output-ready', index: 0, headline: 'First approved headline', imageUrl: '/api/creative-assets/accepted-output-ready' }),
+        output({ id: 'accepted-output-working', index: 1, headline: 'Second approved headline', status: 'generating', imageUrl: null }),
+      ],
+    });
+    const completedJob: CreativeImageJob = {
+      ...acceptedJob, status: 'ready', updatedAt: '2026-09-25T18:02:00.000Z',
+      outputs: acceptedJob.outputs?.map((item, index) => index === 1 ? { ...item, status: 'ready', imageUrl: '/api/creative-assets/accepted-output-working' } : item),
+    };
+    const older = job({ id: 'older-saved', createdAt: '2026-09-24T18:00:00.000Z' });
+    const calls = installFetch({
+      imageResponses: [() => ({ job: acceptedJob, status: 202 })],
+      jobReads: (readIndex) => readIndex === 0 ? [older] : [older, completedJob],
+    });
+    render(<CreativeComposer campaign={{ ...campaign, headlines: acceptedJob.headlines }} />);
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate 2 images' }));
+
+    expect(await within(latest).findByText('1 of 2 separate visuals ready')).toBeTruthy();
+    expect(within(latest).getByRole('img', { name: 'Portrait ad preview for Version A' })).toBeTruthy();
+    expect(within(latest).getAllByText('Generating').length).toBeGreaterThan(0);
+    expect(screen.getByRole('button', { name: 'Reload saved jobs' }).closest('details')).toBeNull();
+    await waitFor(() => expect(within(latest).getByText('2 of 2 separate visuals ready')).toBeTruthy(), { timeout: 5_000 });
+    expect(within(latest).getByRole('img', { name: 'Portrait ad preview for Version B' })).toBeTruthy();
+    expect(calls.filter((call) => call.url.endsWith('/creative/images'))).toHaveLength(1);
+    expect(screen.getByText('Saved creative drafts').closest('details')?.open).toBe(false);
+    const archive = screen.getByText('Saved creative drafts').closest('details')!;
+    expect(within(archive).queryByText('First approved headline')).toBeNull();
+    expect(screen.getAllByText('First approved headline')).toHaveLength(1);
+  }, 8_000);
+
+  it('restores the current generation by campaign without duplicating it in the collapsed archive', async () => {
+    const first = job({ id: 'first-campaign-job' });
+    const secondCampaign: Campaign = { ...campaign, id: 'campaign-image-test-2', name: 'Notebook launch' };
+    const second = job({ id: 'second-campaign-job', campaignId: secondCampaign.id, headlines: ['Notebook headline one', 'Notebook headline two'] });
+    const olderSecond = job({ id: 'older-second-campaign-job', campaignId: secondCampaign.id, headlines: ['Old notebook one', 'Old notebook two'], createdAt: '2026-09-24T18:00:00.000Z' });
+    installFetch({ jobReads: (readIndex) => readIndex === 0 ? [first] : [second, olderSecond] });
+    const view = render(<CreativeComposer campaign={campaign} />);
+    const firstLatest = await screen.findByRole('region', { name: 'Latest creative' });
+    expect(await within(firstLatest).findByRole('button', { name: 'View image for Version A' })).toBeTruthy();
+    view.rerender(<CreativeComposer campaign={secondCampaign} />);
+    const secondLatest = await screen.findByRole('region', { name: 'Latest creative' });
+    expect(within(secondLatest).getByText('Notebook headline one')).toBeTruthy();
+    expect(await within(secondLatest).findByRole('button', { name: 'View image for Version A' })).toBeTruthy();
+    const archive = screen.getByText('Saved creative drafts').closest('details')!;
+    expect(archive.open).toBe(false);
+    expect(within(archive).queryByText('Notebook headline one')).toBeNull();
+  });
+
+  it('features the newest saved request on reload even when an older request is still processing', async () => {
+    const olderActive = job({
+      id: 'older-active-job', status: 'generating', headlines: ['Older in-progress one', 'Older in-progress two'],
+      createdAt: '2026-09-24T18:00:00.000Z', updatedAt: '2026-09-24T18:00:00.000Z',
+    });
+    const newestFailed = job({
+      id: 'newest-failed-job', status: 'failed', headlines: ['Newest failed one', 'Newest failed two'],
+      imageUrl: null, error: 'This latest request failed.',
+    });
+    const calls = installFetch({ jobs: [olderActive, newestFailed] });
+    render(<CreativeComposer campaign={{ ...campaign, headlines: newestFailed.headlines }} />);
+    const latest = await screen.findByRole('region', { name: 'Latest creative' });
+    expect(within(latest).getByText('Needs attention')).toBeTruthy();
+    expect(within(latest).getByText('This latest request failed.')).toBeTruthy();
+    expect(screen.getByText('Saved creative drafts').closest('details')?.open).toBe(false);
+    expect(calls.some((call) => call.url.endsWith('/creative/images') || call.url.endsWith('/creative/videos'))).toBe(false);
   });
 });

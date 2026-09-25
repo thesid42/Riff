@@ -14,6 +14,20 @@ import { emptyMetricTotals, type MetricTotals } from '../shared/types.js';
 const IMPRESSION_CENTS = 2;
 const CLICK_CENTS = 8;
 
+export function latestJudgmentAt(jobs: AgentJob[]): string | null {
+  let latest: string | null = null;
+  let latestTime = -Infinity;
+  for (const job of jobs) {
+    if (job.status !== 'succeeded' || !job.finishedAt) continue;
+    const time = Date.parse(job.finishedAt);
+    if (Number.isFinite(time) && time > latestTime) {
+      latest = job.finishedAt;
+      latestTime = time;
+    }
+  }
+  return latest;
+}
+
 export function lastJobError(jobs: AgentJob[]): string | null {
   const counts = new Map<string, number>();
   for (const job of jobs) {

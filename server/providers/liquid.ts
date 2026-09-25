@@ -1,5 +1,6 @@
 import type { PersonaJudgment } from '../../shared/run.js';
 import { clampRange, clampUnit } from '../../shared/run.js';
+import { HEADLINE_MAX_LENGTH, isValidHeadlineSet } from '../../shared/headlines.js';
 import { ProviderError, boundedText, cancelBody, object, readJson, rejectRedirect, safeBaseUrl, timeoutSignal, type FetchLike } from './common.js';
 
 export interface ExperimentContext {
@@ -64,7 +65,7 @@ const DECISION_JSON_SCHEMA = {
     action: { type: 'string', enum: ['wait', 'propose_test'], description: 'Use wait when essential brief information is missing or review data is insufficient. A wait decision has hypothesis:"" and headlines:[].' },
     explanation: { type: 'string', maxLength: 1_000, description: 'Give a concise reason grounded in the supplied brief, evidence, or lessons.' },
     hypothesis: { type: 'string', maxLength: 500, description: 'For wait, this must be exactly the empty string. For propose_test, state a testable proposal about headline directions without claiming headline-only effects.' },
-    headlines: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: 120 }, description: 'For wait, this must be an empty array with no placeholder words or old headlines. For propose_test, give 2 or 3 materially different, comparable headline angles.' },
+    headlines: { type: 'array', maxItems: 3, items: { type: 'string', maxLength: HEADLINE_MAX_LENGTH, description: 'A final, ready-to-display ad headline in the brief language: a complete phrase, ideally 4–9 words and no more than 60 characters including spaces and punctuation. Keep explanations and hypotheses out of this field.' }, description: 'For wait, this must be an empty array with no placeholder words or old headlines. For propose_test, give 2 or 3 materially different final ad headlines, not summaries of directions.' },
     evidenceIds: { type: 'array', maxItems: 30, items: { type: 'string', maxLength: 100 } },
   },
   required: ['action', 'explanation', 'hypothesis', 'headlines', 'evidenceIds'],
@@ -160,7 +161,7 @@ export class LiquidClient {
       if (typeof message.content !== 'string' || message.content.length > 16_000) throw new ProviderError('Liquid response content was invalid.', 'response');
       let parsed: unknown;
       try { parsed = JSON.parse(message.content); } catch { throw new ProviderError('Liquid returned malformed decision JSON.', 'response'); }
-      const decision = validateDecision(parsed, new Set(normalized.evidence.map(item => item.id)));
+      const decision = validateDecision(parsed, new Set(normalized.evidence.map(item => item.id)), normalized.brief);
       const usage = readUsageMetadata(payload.usage);
       const requestId = safeMetadataText(payload.id, 200);
       const model = safeMetadataText(payload.model, 160) ?? this.model;
@@ -258,7 +259,7 @@ export class LiquidClient {
 
 const judgeSystemPrompt = 'You are a single fictional campaign viewer. Stay in the supplied persona. You receive JSON text only: you cannot see image pixels or watch video, and mediaUrl is a reference string rather than media input. Judge the assigned headline and campaign brief/copy only. Do not describe, score, or infer visual quality or media content. Do not write new headlines. Prefer headline, offer, or unsure for noticedFirst; never claim you saw an image or video from its URL. Return compact JSON only: action (skip, click, or signup), reason (one short sentence), dwellSeconds, timeToActionSeconds, confidence, attention, clarity, trust, purchaseIntent, noticedFirst, and friction. signup means you would join the waitlist. click means you would open the ad but not sign up. skip means you would ignore it. Scores are 0 to 1. Times are seconds from 0 to 60. Do not invent campaign results or claim this is a real customer. No tools.';
 
-const systemPrompt = 'You are a cautious campaign experiment planner. Return only JSON with action (wait or propose_test), explanation, hypothesis, headlines, and evidenceIds. For wait, hypothesis must be the literal empty string and headlines must be the literal empty array; never put placeholder words, rationale, or old headlines in either field. Example wait shape: {"action":"wait","explanation":"<replace with the context-based reason>","hypothesis":"","headlines":[],"evidenceIds":[]}. Replace the explanation with an actual reason from this context; cite only supplied evidence IDs when relevant, otherwise use an empty evidenceIds array. For propose_test, give headline-direction advice only: propose 2 or 3 materially different, comparable headline directions and a testable proposal about those directions. The application may pair each headline with distinct media; when it does, the comparison is between complete headline-and-visual concepts, so do not attribute any outcome to the headline alone. Do not require the image or other creative elements to stay constant. First check that the brief supplies product, approved facts or claims, audience, and goal; if an essential element is missing, choose wait. Never claim a test won or that a proposed hypothesis is a result. Ground each claim only in an explicitly supplied approved fact or claim: do not turn repeated use or other context into unsupported durability, lifespan, savings, or environmental guarantees. Cite only supplied evidence IDs; do not invent IDs or evidence. No tools.';
+const systemPrompt = 'You are a cautious campaign experiment planner. Return only JSON with action (wait or propose_test), explanation, hypothesis, headlines, and evidenceIds. For wait, hypothesis must be the literal empty string and headlines must be the literal empty array; never put placeholder words, rationale, or old headlines in either field. Example wait shape: {"action":"wait","explanation":"<replace with the context-based reason>","hypothesis":"","headlines":[],"evidenceIds":[]}. Replace the explanation with an actual reason from this context; cite only supplied evidence IDs when relevant, otherwise use an empty evidenceIds array. For propose_test, output 2 or 3 final, ready-to-display ad headlines, not headline directions, summaries, or explanations. Each headline should be a complete phrase in the language of the brief, ideally 4–9 words and at most 60 characters including spaces and punctuation. Put rationale only in explanation and hypothesis. Make the final headlines materially different but comparable. The application may pair each headline with distinct media; when it does, the comparison is between complete headline-and-visual concepts, so do not attribute any outcome to the headline alone. Do not require the image or other creative elements to stay constant. First check that the brief supplies product, approved facts or claims, audience, and goal; if an essential element is missing, choose wait. Never claim a test won or that a proposed hypothesis is a result. Ground each claim only in an explicitly supplied approved fact or claim: do not turn repeated use or other context into unsupported durability, lifespan, savings, or environmental guarantees. Cite only supplied evidence IDs; do not invent IDs or evidence. No tools.';
 
 function stagePolicy(stage: ExperimentContext['stage']): string {
   if (stage === 'initial') return 'STAGE POLICY — INITIAL: When product, approved facts or claims, audience, and goal are present, propose a first controlled test. Historical performance observations are not required; do not wait solely because none exist.';
@@ -321,7 +322,7 @@ function validateContext(context: ExperimentContext): ExperimentContext {
   return { brief, evidence, lessons, ...(context.stage === undefined ? {} : { stage: context.stage }) };
 }
 
-function validateDecision(value: unknown, suppliedEvidence: Set<string>): ExperimentDecision {
+function validateDecision(value: unknown, suppliedEvidence: Set<string>, brief: string): ExperimentDecision {
   const v = object(value, 'Liquid returned an invalid decision.');
   if (v.action !== 'wait' && v.action !== 'propose_test') throw new ProviderError('Liquid decision action is invalid.', 'response');
   const explanation = boundedText(v.explanation, 'explanation', 1_000);
@@ -334,12 +335,27 @@ function validateDecision(value: unknown, suppliedEvidence: Set<string>): Experi
   } else {
     hypothesis = boundedText(v.hypothesis, 'hypothesis', 500);
     if (hypothesis.length < 10) throw new ProviderError('Liquid test hypothesis is too short.', 'response');
-    if (!Array.isArray(v.headlines) || v.headlines.length < 2 || v.headlines.length > 3) throw new ProviderError('Liquid decision must include 2 or 3 comparable headlines.', 'response');
-    headlines = v.headlines.map(x => boundedText(x, 'headline', 120));
-    if (new Set(headlines.map(x => x.toLocaleLowerCase())).size !== headlines.length) throw new ProviderError('Liquid comparison headlines must be unique.', 'response');
+    if (!Array.isArray(v.headlines) || v.headlines.length < 2 || v.headlines.length > 3 || v.headlines.some(item => typeof item !== 'string')) {
+      throw new ProviderError('Liquid must return 2 or 3 final headlines of up to 60 characters each.', 'response');
+    }
+    headlines = v.headlines.map(item => (item as string).trim());
+    if (!isValidHeadlineSet(headlines)) {
+      throw new ProviderError('Liquid headlines must be 2 or 3 unique, non-empty lines of up to 60 characters, without control or replacement characters.', 'response');
+    }
+    if (hasLatinLetter(brief) && !hasNonLatinLetter(brief) && headlines.some(hasNonLatinLetter)) {
+      throw new ProviderError('Liquid headlines do not match the campaign brief language.', 'response');
+    }
   }
   if (!Array.isArray(v.evidenceIds) || v.evidenceIds.length > 30 || v.evidenceIds.some(id => typeof id !== 'string' || !suppliedEvidence.has(id))) throw new ProviderError('Liquid decision cited evidence that was not supplied.', 'response');
   return { action: v.action, explanation, hypothesis, headlines, evidenceIds: [...new Set(v.evidenceIds as string[])] };
+}
+
+function hasLatinLetter(value: string): boolean {
+  return Array.from(value).some(character => /\p{L}/u.test(character) && /\p{Script=Latin}/u.test(character));
+}
+
+function hasNonLatinLetter(value: string): boolean {
+  return Array.from(value).some(character => /\p{L}/u.test(character) && !/\p{Script=Latin}/u.test(character));
 }
 
 function validateJudgeContext(context: CreativeJudgeContext): CreativeJudgeContext {

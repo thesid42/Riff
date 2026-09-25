@@ -1,0 +1,14 @@
+.media-viewer-controls { display: flex; flex: 0 0 auto; align-items: center; gap: 14px; }
+.media-version-navigation { display: flex; align-items: center; gap: 8px; }
+.media-version-arrow { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid #dbe4d8; border-radius: 9px; background: #f7faf5; color: #3d6445; cursor: pointer; }
+.media-version-arrow:hover:not(:disabled) { background: #eaf2e6; border-color: #a8bfa3; }
+.media-version-arrow:disabled { color: #a3ada1; background: #f7f8f6; cursor: default; opacity: .55; }
+.media-version-arrow:focus-visible { outline: 2px solid #547b5a; outline-offset: 3px; }
+.media-version-position { min-width: 46px; text-align: center; white-space: nowrap; color: #566758; font-size: 14px; font-variant-numeric: tabular-nums; }
+@media (max-width: 640px) {
+  .media-viewer-heading { flex-wrap: wrap; }
+  .media-viewer-heading > div:first-child { flex: 1 1 140px; }
+  .media-viewer-controls { margin-left: auto; gap: 8px; }
+  .media-version-navigation { gap: 4px; }
+  .media-version-arrow { width: 40px; height: 40px; }
+}

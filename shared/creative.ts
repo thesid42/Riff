@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { headlineSetSchema } from './headlines.js';
 
 const variantPromptsSchema = z.array(z.string().trim().min(1).max(4_000)).min(2).max(3)
   .refine(values => new Set(values.map(value => value.toLocaleLowerCase())).size === values.length, 'Variant prompts must be unique.');
@@ -11,8 +12,7 @@ function validateVariantPrompts(value: { headlines: string[]; variantPrompts?: s
 
 export const creativeImageRequestSchema = z.object({
   requestId: z.string().uuid(),
-  headlines: z.array(z.string().trim().min(1).max(120)).min(2).max(3)
-    .refine(values => new Set(values.map(value => value.toLocaleLowerCase())).size === values.length, 'Headlines must be unique.'),
+  headlines: headlineSetSchema,
   imagePrompt: z.string().trim().min(1).max(4_000),
   variantPrompts: variantPromptsSchema.optional(),
 }).strict().superRefine(validateVariantPrompts);

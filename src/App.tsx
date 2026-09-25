@@ -1,15 +1,19 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import {
   ArrowRight, BarChart3, BookOpen, Check, ChevronDown, CircleHelp, FlaskConical,
-  Leaf, LineChart, LoaderCircle, Plus, Settings2, Sparkles, Sprout, X,
+  Leaf, LoaderCircle, Plus, Settings2, Sprout, X,
 } from 'lucide-react';
 import type {
   Campaign, Experiment, IntegrationStatus, Lesson, MetricsSnapshot, Variant,
 } from '../shared/types.js';
 import type { WaveSnapshot } from '../shared/run.js';
 import type { CreativeImageJob } from '../shared/creative.js';
+import { isStoredHeadlineSet, isValidHeadlineSet } from '../shared/headlines.js';
 import CreativeComposer from './CreativeComposer.js';
 import PersonaWave from './PersonaWave.js';
+import SignupChart from './SignupChart.js';
+import ExperimentResults from './ExperimentResults.js';
+import './charts.css';
 
 type View = 'Campaign' | 'Experiments' | 'Lessons' | 'Connections';
 type Drawer = 'metrics' | 'setup' | null;
@@ -26,11 +30,6 @@ interface SelectedCreative {
   campaignId: string;
   jobId: string;
   headlines: string[];
-}
-
-function validHeadlineDraft(headlines: string[] | undefined): headlines is string[] {
-  return Boolean(headlines && headlines.length >= 2 && headlines.length <= 3 && headlines.every((line) => line.trim().length > 0 && line.trim().length <= 120) &&
-    new Set(headlines.map((line) => line.trim().toLocaleLowerCase())).size === headlines.length);
 }
 
 interface ApiError extends Error {
@@ -123,9 +122,9 @@ export default function App() {
   const matchingDetails = details?.campaign.id === selectedId ? details : null;
   const composerHeadlines = hasComposerDraft
     ? composerDrafts[selectedId]!
-    : validHeadlineDraft(activeCampaign?.headlines) ? activeCampaign.headlines :
-      validHeadlineDraft(matchingDetails?.wave?.headlines) ? matchingDetails.wave.headlines : [];
-  const currentCreativeSelection = selectedCreative?.campaignId === selectedId &&
+    : (activeCampaign?.headlines && isStoredHeadlineSet(activeCampaign.headlines)) ? activeCampaign.headlines :
+      (matchingDetails?.wave?.headlines && isStoredHeadlineSet(matchingDetails.wave.headlines)) ? matchingDetails.wave.headlines : [];
+  const currentCreativeSelection = selectedCreative?.campaignId === selectedId && isValidHeadlineSet(selectedCreative.headlines) && isValidHeadlineSet(composerHeadlines) &&
     JSON.stringify(selectedCreative.headlines) === JSON.stringify(composerHeadlines) ? selectedCreative : null;
 
   function updateComposerHeadlines(campaignId: string, headlines: string[]) {
@@ -209,16 +208,24 @@ export default function App() {
 
   useEffect(() => {
     if (!selectedId || details?.wave?.runtime !== 'running') return;
-    const timer = window.setInterval(() => {
-      const controller = new AbortController();
-      getJson<CampaignDetails>(`/api/campaigns/${encodeURIComponent(selectedId)}`, controller.signal)
-        .then((result) => { if (result.campaign.id === selectedId) setDetails(result); })
-        .catch(() => { /* The next poll retries. */ });
-      getJson<MetricsSnapshot>(`/api/campaigns/${encodeURIComponent(selectedId)}/metrics`, controller.signal)
-        .then((result) => { if (result.campaignId === selectedId) setMetrics(result); })
-        .catch(() => { /* The next poll retries. */ });
-    }, 2000);
-    return () => window.clearInterval(timer);
+    const controller = new AbortController();
+    let inFlight = false;
+    async function refreshWave() {
+      if (inFlight || controller.signal.aborted) return;
+      inFlight = true;
+      const [nextDetails, nextMetrics] = await Promise.allSettled([
+        getJson<CampaignDetails>(`/api/campaigns/${encodeURIComponent(selectedId)}`, controller.signal),
+        getJson<MetricsSnapshot>(`/api/campaigns/${encodeURIComponent(selectedId)}/metrics`, controller.signal),
+      ]);
+      if (!controller.signal.aborted) {
+        if (nextDetails.status === 'fulfilled' && nextDetails.value.campaign.id === selectedId) setDetails(nextDetails.value);
+        if (nextMetrics.status === 'fulfilled' && nextMetrics.value.campaignId === selectedId) setMetrics(nextMetrics.value);
+      }
+      inFlight = false;
+    }
+    void refreshWave();
+    const timer = window.setInterval(() => void refreshWave(), 2000);
+    return () => { controller.abort(); window.clearInterval(timer); };
   }, [selectedId, details?.wave?.runtime]);
 
   async function createCampaign(event: FormEvent<HTMLFormElement>) {
@@ -340,12 +347,13 @@ export default function App() {
                 onShowMetrics={() => setDrawer('metrics')}
                 onCreate={() => { setSaveError(''); setDialogOpen(true); }}
                 onRetryList={() => setListRetry((count) => count + 1)}
-                composerHeadlines={composerHeadlines}
-                initialHeadlines={hasComposerDraft || validHeadlineDraft(composerHeadlines) ? composerHeadlines : undefined}
+                onOpenExperiments={() => setView('Experiments')}
+                initialHeadlines={hasComposerDraft || isStoredHeadlineSet(composerHeadlines) ? composerHeadlines : undefined}
                 onHeadlinesChange={(headlines) => activeCampaign && updateComposerHeadlines(activeCampaign.id, headlines)}
                 selectedCreativeJobId={currentCreativeSelection?.jobId ?? null}
                 onUseForExperiment={(job, headlines) => {
-                  if (!activeCampaign) return;
+                  if (!activeCampaign || !isValidHeadlineSet(headlines)) return;
+                  updateComposerHeadlines(activeCampaign.id, [...headlines]);
                   setSelectedCreative({ campaignId: activeCampaign.id, jobId: job.id, headlines: [...headlines] });
                   setView('Experiments');
                   window.requestAnimationFrame(() => document.getElementById('experiment-setup')?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }));
@@ -356,15 +364,16 @@ export default function App() {
               <ExperimentsView
                 campaign={activeCampaign}
                 details={details?.campaign.id === selectedId ? details : null}
+                metrics={metrics?.campaignId === selectedId ? metrics : null}
                 headlines={currentCreativeSelection?.headlines ?? composerHeadlines}
                 creativeJobId={currentCreativeSelection?.jobId ?? null}
                 onClearCreative={() => setSelectedCreative(null)}
                 loading={detailsLoading}
                 error={detailsError}
                 onRetry={retryCampaign}
-                onWave={(wave) => setDetails((current) => current ? { ...current, wave, campaign: { ...current.campaign, runtime: wave.runtime, agentCount: wave.agentCount, concurrency: wave.concurrency, headlines: wave.headlines } } : current)}
+                onWave={(wave) => setDetails((current) => current?.campaign.id === selectedId ? { ...current, wave, campaign: { ...current.campaign, runtime: wave.runtime, agentCount: wave.agentCount, concurrency: wave.concurrency, headlines: wave.headlines } } : current)}
                 onCampaign={(campaign) => {
-                  setDetails((current) => current ? { ...current, campaign } : current);
+                  setDetails((current) => current?.campaign.id === campaign.id ? { ...current, campaign } : current);
                   setCampaigns((previous) => previous.map((item) => item.id === campaign.id ? campaign : item));
                 }}
               />
@@ -401,7 +410,7 @@ function LoadingState({ label }: { label: string }) {
 
 function CampaignDashboard({
   campaign, details, metrics, listLoading, listError, detailsLoading, metricsLoading, detailsError, metricsError, onRetry, onShowMetrics, onCreate, onRetryList,
-  composerHeadlines, initialHeadlines, onHeadlinesChange, selectedCreativeJobId, onUseForExperiment,
+  onOpenExperiments, initialHeadlines, onHeadlinesChange, selectedCreativeJobId, onUseForExperiment,
 }: {
   campaign: Campaign | null;
   details: CampaignDetails | null;
@@ -416,7 +425,7 @@ function CampaignDashboard({
   onShowMetrics: () => void;
   onCreate: () => void;
   onRetryList: () => void;
-  composerHeadlines: string[];
+  onOpenExperiments: () => void;
   initialHeadlines?: string[];
   onHeadlinesChange: (headlines: string[]) => void;
   selectedCreativeJobId: string | null;
@@ -425,9 +434,7 @@ function CampaignDashboard({
   const totals = metrics?.totals;
   const spend = totals ? money(totals.spendCents) : '—';
   const spendPercent = totals && campaign && campaign.budgetCents > 0 ? Math.min(100, Math.max(0, totals.spendCents / campaign.budgetCents * 100)) : 0;
-  const updatedAt = displayTime(metrics?.updatedAt);
   const variants = details?.variants ?? [];
-  const series = metrics?.series ?? [];
   const retryError = detailsError || metricsError;
 
   return (
@@ -449,19 +456,18 @@ function CampaignDashboard({
       </section>
 
       <div className="insight-grid">
-        <section className="panel chart-panel" aria-labelledby="chart-title">
+        <section className="panel chart-panel chart-panel-explained" aria-labelledby="chart-title">
           <div className="panel-heading">
-            <div><span className="section-kicker">PERFORMANCE</span><h2 id="chart-title">Sign-ups over time</h2><p>{metrics?.window.label ?? 'Campaign history'}</p></div>
-            {series.length > 0 && <span className="chart-legend">By variant</span>}
+            <div><span className="section-kicker">LOCAL PERSONA SIMULATION</span><h2 id="chart-title">Cumulative simulated sign-ups</h2><p>Each step adds a recorded sign-up from a simulated audience profile. Versions are compared over the same wave timeline.</p></div>
           </div>
-          <SignupChart series={series} variants={variants} loading={metricsLoading} />
-          <div className="chart-footnote"><span>{metrics?.source && metrics.source !== 'none' ? `Source: ${humanizeStatus(metrics.source)}` : 'No analytics collected'}</span><span>{updatedAt ? `Updated ${updatedAt}` : 'Waiting for data'}</span></div>
+          <SignupChart metrics={metrics} variants={variants} loading={metricsLoading} />
+          <div className="chart-footnote"><span>{metrics?.window.label ?? 'Latest persona wave'}</span><span>Analytics export destination: {metrics?.source && metrics.source !== 'none' ? humanizeStatus(metrics.source) : 'not configured'}</span></div>
         </section>
 
         <section className="next-panel" aria-labelledby="next-title">
           <div className="next-topline"><span className="next-icon"><Sprout size={19} /></span><span className="section-kicker">CAMPAIGN STATUS</span></div>
           <h2 id="next-title">{listLoading ? 'Checking saved campaigns…' : listError ? 'Campaigns could not be loaded.' : campaign ? 'Your campaign draft is saved.' : 'Start with a campaign brief.'}</h2>
-          <p>{listError ? 'Retry the campaign list before creating a new draft, so existing work stays easy to find.' : campaign ? 'The product, audience, approved claims, and budget are saved. Results will appear when campaign activity is available.' : listLoading ? 'The workspace is checking for drafts saved on this device.' : 'Add a product, audience, approved claims, and demo budget to create a draft.'}</p>
+          <p>{listError ? 'Retry the campaign list before creating a new draft, so existing work stays easy to find.' : campaign ? metrics?.status === 'available' ? 'Your latest experiment results are shown alongside this brief. Compare the headline versions using the simulated sign-up counts and time axis.' : 'The product, audience, approved claims, and budget are saved. Results will appear when campaign activity is available.' : listLoading ? 'The workspace is checking for drafts saved on this device.' : 'Add a product, audience, approved claims, and demo budget to create a draft.'}</p>
           <div className="next-divider" />
           {listError ? <button type="button" className="button button-secondary" onClick={onRetryList}>Retry campaign list <ArrowRight size={15} /></button> : campaign ? <div className="next-bottom"><span className="status-pill"><span className="status-dot" /> Draft</span><span>{details?.wave?.runtime === 'running' ? 'Persona wave running' : detailsLoading ? 'Loading campaign' : details?.wave?.progress.total ? `${details.wave.progress.succeeded} judged` : 'No activity started'}</span></div> : <button type="button" className="button button-primary" onClick={onCreate} disabled={listLoading}><Plus size={16} /> Create campaign draft</button>}
           {metrics?.message && <p className="source-message">{metrics.message}</p>}
@@ -470,21 +476,10 @@ function CampaignDashboard({
 
       {campaign && <CreativeComposer campaign={campaign} initialHeadlines={initialHeadlines} onHeadlinesChange={onHeadlinesChange} selectedCreativeJobId={selectedCreativeJobId} onUseForExperiment={onUseForExperiment} />}
 
-      <section className="creative-section" aria-labelledby="creative-title">
-        <div className="creative-heading">
-          <div><span className="section-kicker">CAMPAIGN CONTENT</span><h2 id="creative-title">Creatives &amp; versions</h2></div>
-          <p>{variants.length > 0 ? `${variants.length} ${variants.length === 1 ? 'version' : 'versions'} in this campaign` : 'Versions appear when they are saved to this campaign.'}</p>
-        </div>
-        {detailsLoading && !details && campaign ? <div className="panel quiet-loading"><LoaderCircle size={16} className="spin" /> Loading campaign content…</div> : variants.length > 0 ? (
-          <div className="creative-grid">{variants.map((variant) => <CreativeCard key={variant.id} variant={variant} metrics={metrics} />)}</div>
-        ) : (
-          <div className="empty-creatives">
-            <div className="empty-creative-icon"><Sparkles size={19} /></div>
-            <div><h3>{campaign ? 'No experiment versions yet' : listLoading ? 'Checking campaign content' : 'No campaign content yet'}</h3><p>{campaign ? 'Image drafts appear above. Experiment versions and comparisons will show here when they are saved.' : 'Save a campaign draft to keep future versions and comparisons with its brief.'}</p></div>
-            {campaign && <span className="empty-chip">Draft only</span>}
-          </div>
-        )}
-      </section>
+      {campaign ? <section className="experiment-summary-link" aria-label="Experiment results">
+        <div><h3>{details?.experiments.length ? 'Your experiment results are in Experiments' : 'Ready to compare your headlines?'}</h3><p>Keep generated creatives here. Compare simulated responses and review previous waves in Experiments.</p></div>
+        <button type="button" className="button button-secondary" onClick={onOpenExperiments}>{details?.experiments.length ? 'View experiment results' : 'Set up an experiment'} <ArrowRight size={16} /></button>
+      </section> : <div className="empty-creatives"><div><h3>No campaign content yet</h3><p>Save a campaign draft to create and review your first ads.</p></div></div>}
     </div>
   );
 }
@@ -497,72 +492,12 @@ function MetricItem({ label, value, hint }: { label: string; value: string; hint
   return <div className="metric-item"><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-hint">{hint}</div></div>;
 }
 
-function SignupChart({ series, variants, loading }: { series: MetricsSnapshot['series']; variants: Variant[]; loading: boolean }) {
-  const colors = ['#527d57', '#99b89a', '#b39869', '#648d9a', '#9c829d'];
-  const tracks = useMemo(() => {
-    const byVariant = new Map<string, Array<{ timestamp: string; time: number; signups: number }>>();
-    for (const point of series) {
-      const time = new Date(point.timestamp).getTime();
-      if (!Number.isFinite(time) || !Number.isFinite(point.signups) || point.signups < 0 || !point.variantId) continue;
-      const track = byVariant.get(point.variantId) ?? [];
-      track.push({ timestamp: new Date(time).toISOString(), time, signups: point.signups });
-      byVariant.set(point.variantId, track);
-    }
-    return [...byVariant.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([variantId, points], index) => ({
-      variantId,
-      label: variants.find((variant) => variant.id === variantId)?.label ?? `Variant ${index + 1}`,
-      color: colors[index % colors.length],
-      points: points.sort((a, b) => a.time - b.time),
-    }));
-  }, [series, variants]);
-  const timestamps = tracks.flatMap((track) => track.points.map((point) => point.time));
-  const minTime = timestamps.length ? Math.min(...timestamps) : 0;
-  const maxTime = timestamps.length ? Math.max(...timestamps) : 1;
-  const maxValue = Math.max(1, ...tracks.flatMap((track) => track.points.map((point) => point.signups)));
-  const hasData = tracks.some((track) => track.points.length > 0);
-  const xForTime = (time: number) => maxTime === minTime ? 350 : 18 + ((time - minTime) / (maxTime - minTime)) * 664;
-  const yForValue = (value: number) => 178 - (value / maxValue) * 142;
-
-  return (
-    <div className={`chart-plot ${hasData ? '' : 'chart-empty'}`} aria-label={hasData ? 'Sign-ups over time for each variant' : 'No sign-up trend data'} role="img">
-      {hasData && <div className="chart-series-legend">{tracks.map((track) => <span key={track.variantId}><i style={{ backgroundColor: track.color }} />{track.label}</span>)}</div>}
-      <svg viewBox="0 0 700 202" preserveAspectRatio="none" aria-hidden="true">
-        {[36, 82, 128, 174].map((y) => <line key={y} x1="16" x2="684" y1={y} y2={y} className="grid-line" />)}
-        {hasData && tracks.map((track) => <g key={track.variantId}>
-          {track.points.length > 1 && <polyline points={track.points.map((point) => `${xForTime(point.time)},${yForValue(point.signups)}`).join(' ')} className="chart-line" style={{ stroke: track.color }} />}
-          {track.points.map((point, index) => <circle key={`${point.timestamp}-${index}`} cx={xForTime(point.time)} cy={yForValue(point.signups)} r="3.5" className="chart-point" style={{ fill: track.color }}><title>{`${track.label} · ${displayTime(point.timestamp) ?? point.timestamp}: ${count(point.signups)} sign-ups`}</title></circle>)}
-        </g>)}
-      </svg>
-      {loading && !hasData && <div className="chart-placeholder"><LoaderCircle size={15} className="spin" /> Loading results…</div>}
-      {!loading && !hasData && <div className="chart-placeholder"><span className="chart-empty-mark"><LineChart size={19} /></span><span>No trend data yet</span><small>Sign-up activity will appear here when analytics has results.</small></div>}
-      {hasData && <div className="chart-time-labels"><span>{displayTime(new Date(minTime).toISOString()) ?? ''}</span><span>{displayTime(new Date(maxTime).toISOString()) ?? ''}</span></div>}
-    </div>
-  );
-}
-
-function CreativeCard({ variant, metrics }: { variant: Variant; metrics: MetricsSnapshot | null }) {
-  const totals = metrics?.variants.find((item) => item.variantId === variant.id)?.totals;
-  const statusClass = `creative-status status-${variant.status}`;
-  return (
-    <article className="creative-card">
-      <div className="creative-card-head"><div className="creative-label"><span className="version-badge">{variant.label}</span><div><strong>{variant.headline || 'Untitled version'}</strong><span className={statusClass}><span className="status-dot" />{humanizeStatus(variant.status)}</span></div></div><span className="version-date">{displayTime(variant.createdAt) ?? '—'}</span></div>
-      <div className="creative-image-frame">{variant.videoUrl ? <video controls preload="metadata" src={variant.videoUrl} aria-label={`${variant.label} creative`} /> : variant.imageUrl ? <img src={variant.imageUrl} alt={`${variant.label} creative`} loading="lazy" /> : <div className="creative-image-empty"><Sparkles size={24} /><span>No image attached</span></div>}</div>
-      <div className="creative-data-row">
-        <span><strong>{totals ? count(totals.impressions) : '—'}</strong><small>Ad views</small></span>
-        <span><strong>{totals ? count(totals.clicks) : '—'}</strong><small>Clicks</small></span>
-        <span><strong>{totals ? count(totals.signups) : '—'}</strong><small>Sign-ups</small></span>
-        <span><strong>{totals ? percent(totals.impressions ? totals.clicks / totals.impressions : null) : '—'}</strong><small>Click rate</small></span>
-      </div>
-      <div className="creative-card-foot"><span>{variant.parentId ? `Parent version ${variant.parentId}` : 'Original version'}</span><span>{variant.status === 'draft' ? 'No traffic' : 'No allocation data'}</span></div>
-    </article>
-  );
-}
-
 function ExperimentsView({
-  campaign, details, headlines, creativeJobId, onClearCreative, loading, error, onRetry, onWave, onCampaign,
+  campaign, details, metrics, headlines, creativeJobId, onClearCreative, loading, error, onRetry, onWave, onCampaign,
 }: {
   campaign: Campaign | null;
   details: CampaignDetails | null;
+  metrics: MetricsSnapshot | null;
   headlines: string[];
   creativeJobId: string | null;
   onClearCreative: () => void;
@@ -575,23 +510,12 @@ function ExperimentsView({
   return (
     <div className="dashboard-stack">
       {campaign ? (
-        <PersonaWave campaign={campaign} headlines={headlines} creativeJobId={creativeJobId} onClearCreative={onClearCreative} wave={details?.wave ?? null} onWave={onWave} onCampaign={onCampaign} />
+        <PersonaWave key={`wave-${campaign.id}`} campaign={campaign} headlines={headlines} creativeJobId={creativeJobId} onClearCreative={onClearCreative} wave={details?.wave ?? null} onWave={onWave} onCampaign={onCampaign} />
       ) : (
         <div className="empty-records"><span className="empty-record-icon"><FlaskConical size={20} /></span><h3>Choose a campaign to begin</h3><p>Save a campaign draft and configure persona judges here when you are ready to run a wave.</p></div>
       )}
-      <RecordsView
-        title="Experiments"
-        description="Each wave keeps its hypothesis, versions, and review together."
-        icon={<FlaskConical size={19} />}
-        loading={loading}
-        error={error}
-        onRetry={onRetry}
-        hasCampaign={Boolean(campaign)}
-        emptyTitle="No waves yet"
-        emptyBody="Start a persona wave above. Completed waves will appear here with their hypothesis and versions."
-        items={details?.experiments ?? []}
-        kind="experiment"
-      />
+      {error && <div className="alert alert-error" role="alert"><span>{error}</span><button type="button" className="text-button" onClick={onRetry}>Retry</button></div>}
+      {loading ? <LoadingState label="Loading experiments…" /> : campaign && <ExperimentResults key={`results-${campaign.id}`} experiments={details?.experiments ?? []} variants={details?.variants ?? []} metrics={metrics} currentExperimentId={details?.wave?.experimentId ?? null} />}
     </div>
   );
 }

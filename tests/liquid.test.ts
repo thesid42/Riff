@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { LiquidClient, LIQUID_DEFAULT_MAX_TOKENS, LIQUID_DEFAULT_TIMEOUT_MS, isOpenRouterBaseUrl, type ExperimentDecision } from '../server/providers/liquid.js';
 import { createProviders, getIntegrationStatuses } from '../server/providers/index.js';
+import { countHeadlineCharacters, HEADLINE_MAX_LENGTH, isStoredHeadlineSet, isValidHeadlineSet, LEGACY_HEADLINE_MAX_LENGTH } from '../shared/headlines.js';
 
 const openRouterBase = 'https://openrouter.ai/api/v1';
 const openRouterModel = 'liquid/lfm-2.5-2.6b:free';
@@ -78,7 +79,10 @@ describe('OpenRouter Liquid adapter', () => {
     expect(request?.body.response_format.json_schema.schema.properties).toHaveProperty('evidenceIds');
     expect(request?.body.response_format.json_schema.schema.properties.hypothesis.description).toContain('exactly the empty string');
     expect(request?.body.response_format.json_schema.schema.properties.headlines.description).toContain('empty array');
-    expect(request?.body.messages[0].content).toContain('headline-direction advice only');
+    expect(request?.body.response_format.json_schema.schema.properties.headlines.items.maxLength).toBe(HEADLINE_MAX_LENGTH);
+    expect(request?.body.response_format.json_schema.schema.properties.headlines.items.description).toContain('ready-to-display ad headline');
+    expect(request?.body.messages[0].content).toContain('final, ready-to-display ad headlines');
+    expect(request?.body.messages[0].content).toContain('language of the brief');
     expect(request?.body.messages[0].content).toContain('complete headline-and-visual concepts');
     expect(request?.body.messages[0].content).not.toContain('keep the image');
     expect(result.decision).toEqual(decision);
@@ -226,6 +230,53 @@ describe('OpenRouter Liquid adapter', () => {
         code: 'response', message: 'Liquid wait decisions must not propose creative.',
       });
     }
+  });
+
+  it('counts trimmed Unicode code points and preserves the separate legacy stored-headline limit', () => {
+    expect(countHeadlineCharacters('  🌱A  ')).toBe(2);
+    expect(HEADLINE_MAX_LENGTH).toBe(60);
+    expect(LEGACY_HEADLINE_MAX_LENGTH).toBe(120);
+    expect(isValidHeadlineSet(['🌱'.repeat(60), 'é'.repeat(60)])).toBe(true);
+    expect(isValidHeadlineSet(['🌱'.repeat(61), 'A second line'])).toBe(false);
+    expect(isValidHeadlineSet(['A\nB', 'A second line'])).toBe(false);
+    expect(isValidHeadlineSet(['A�B', 'A second line'])).toBe(false);
+    expect(isStoredHeadlineSet(['x'.repeat(120), 'another stored line'])).toBe(true);
+    expect(isStoredHeadlineSet(['x'.repeat(121), 'another stored line'])).toBe(false);
+  });
+
+  it('accepts accented Latin and emoji, rejects stray non-Latin generated copy, and permits mixed-language briefs', async () => {
+    const accented: ExperimentDecision = {
+      ...decision,
+      headlines: ['Café teams, find focus ✨', "Don't miss your design team's next win"],
+    };
+    const accentedClient = client(async () => openRouterResponse({ content: JSON.stringify(accented) }));
+    await expect(accentedClient.proposeExperiment(context)).resolves.toEqual(accented);
+
+    const strayScript: ExperimentDecision = {
+      ...decision,
+      headlines: ['Try 现在 today', 'Keep feedback clear'],
+    };
+    const wrongLanguageClient = client(async () => openRouterResponse({ content: JSON.stringify(strayScript) }));
+    await expect(wrongLanguageClient.proposeExperiment(context)).rejects.toMatchObject({
+      code: 'response', message: 'Liquid headlines do not match the campaign brief language.',
+    });
+
+    const mixedLanguageContext = { ...context, brief: `${context.brief} Audience note: 中文用户。` };
+    const multilingual: ExperimentDecision = { ...decision, headlines: ['更轻松地整理设计反馈', 'Keep feedback clear'] };
+    const multilingualClient = client(async () => openRouterResponse({ content: JSON.stringify(multilingual) }));
+    await expect(multilingualClient.proposeExperiment(mixedLanguageContext)).resolves.toEqual(multilingual);
+  });
+
+  it('accepts a 60-code-point Liquid headline and rejects 61 without truncating it', async () => {
+    const exact: ExperimentDecision = { ...decision, headlines: ['A'.repeat(60), 'B'.repeat(60)] };
+    const validClient = client(async () => openRouterResponse({ content: JSON.stringify(exact) }));
+    await expect(validClient.proposeExperiment(context)).resolves.toEqual(exact);
+
+    const overLimit: ExperimentDecision = { ...decision, headlines: ['A'.repeat(61), 'A second line'] };
+    const invalidClient = client(async () => openRouterResponse({ content: JSON.stringify(overLimit) }));
+    await expect(invalidClient.proposeExperiment(context)).rejects.toMatchObject({
+      code: 'response', message: 'Liquid headlines must be 2 or 3 unique, non-empty lines of up to 60 characters, without control or replacement characters.',
+    });
   });
 
   it('requires a stop finish reason for OpenRouter but preserves legacy local JSON-object responses', async () => {

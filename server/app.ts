@@ -125,7 +125,7 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   app.post<{ Params: { id: string } }>('/api/campaigns/:id/headlines', async (request, reply) => {
     const parsed = persistHeadlinesSchema.safeParse(request.body);
     if (!parsed.success) {
-      return reply.code(400).send({ error: { code: 'validation_error', message: 'Provide 2 or 3 unique headlines.' } });
+      return reply.code(400).send({ error: { code: 'validation_error', message: 'Provide 2 or 3 unique headlines, each no longer than 60 characters.' } });
     }
     const campaign = database.getCampaign(request.params.id);
     if (!campaign) return notFound(reply, 'Campaign');
@@ -160,7 +160,10 @@ export function createApp(options: CreateAppOptions = {}): FastifyInstance {
   app.post<{ Params: { id: string } }>('/api/campaigns/:id/run', async (request, reply) => {
     const parsed = runWaveSchema.safeParse(request.body ?? {});
     if (!parsed.success) {
-      return reply.code(400).send({ error: { code: 'validation_error', message: 'Wave settings are invalid.' } });
+      const message = parsed.error.issues.some(issue => issue.path[0] === 'headlines')
+        ? 'Wave settings are invalid. Headlines must be unique and no longer than 60 characters each.'
+        : 'Wave settings are invalid.';
+      return reply.code(400).send({ error: { code: 'validation_error', message } });
     }
     const campaign = database.getCampaign(request.params.id);
     if (!campaign) return notFound(reply, 'Campaign');

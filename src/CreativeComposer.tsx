@@ -2,7 +2,12 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertCircle, ArrowDownToLine, Eye, ImagePlus, LoaderCircle, Play, Plus, RefreshCw, Sparkles, X } from 'lucide-react';
 import type { Campaign } from '../shared/types.js';
 import type { CreativeImageJob, CreativeVariantOutput, CreativeVideoOptions } from '../shared/creative.js';
+import { countHeadlineCharacters, HEADLINE_MAX_LENGTH, isStoredHeadlineSet, isValidHeadlineSet } from '../shared/headlines.js';
+import { buildProductImagePrompt, PRODUCT_IMAGE_COMPOSITIONS } from '../shared/image-prompts.js';
 import CreativeMediaViewer from './CreativeMediaViewer.js';
+import AdImagePreview from './AdImagePreview.js';
+import { drawFinishedAd, finishedAdPngBlob, loadFinishedAdImage } from './ad-image.js';
+import './creative-preview.css';
 
 type CreativeMediaType = 'image' | 'video';
 interface CreativeCapabilities { image: boolean; video: boolean }
@@ -27,6 +32,7 @@ interface ComposerState {
   imagePrompt: string;
   promptEdited: boolean;
   jobs: CreativeImageJob[];
+  featuredJobId: string | null;
   capabilities: CreativeCapabilities;
   mediaType: CreativeMediaType;
   videoOptions: CreativeVideoOptions;
@@ -45,7 +51,7 @@ interface ComposerState {
 
 const EMPTY_STATE: ComposerState = {
   loadStatus: 'loading', loadError: '', imagePromptSuggestion: '', imagePrompt: '', promptEdited: false,
-  jobs: [], capabilities: { image: true, video: false }, mediaType: 'image',
+  jobs: [], featuredJobId: null, capabilities: { image: true, video: false }, mediaType: 'image',
   videoOptions: { durationSeconds: 5, resolution: 'hd', aspectRatio: '1:1', generateAudio: false, draft: true },
   planLoading: false, planError: '', decision: null, metadata: null, headlines: [], variantPrompts: [], headlinesTouched: false,
   generationLoading: false, generationError: '', reloadVersion: 0, manualEditing: false,
@@ -92,8 +98,7 @@ function parseDecision(value: unknown): ExperimentDecision {
     if (decision.hypothesis !== '' || decision.headlines.length !== 0) throw new Error('Liquid returned an invalid wait recommendation. Try again.');
   } else {
     const headlines = decision.headlines.map((line) => line.trim());
-    if (headlines.length < 2 || headlines.length > 3 || headlines.some((line) => !line || line.length > 120) ||
-        new Set(headlines.map((line) => line.toLocaleLowerCase())).size !== headlines.length || decision.hypothesis.trim().length < 10) {
+    if (!isValidHeadlineSet(headlines) || decision.hypothesis.trim().length < 10) {
       throw new Error('Liquid returned unusable headline suggestions. Review the brief and try again.');
     }
     decision.headlines = headlines;
@@ -132,19 +137,12 @@ function variantDirection(campaign: Campaign, mediaType: CreativeMediaType, inde
     if (index === 1) return `Everyday setting: show the same ${product}, with its saved appearance unchanged, in a restrained scene relevant to ${audience}; use a gentle lateral pan. Keep it uncluttered and add no implied benefits, text, or logos.`;
     return `Detail angle: a slow controlled pan across visible form and materials of the same ${product}, only as described in the saved brief; soft light, simple background, no added features, text, or logos.`;
   }
-  const imageBase = `Polished factual commercial product photography of ${campaign.product.trim()}. Use a neutral seamless studio backdrop, distinct from the product's described color and material. Soft diffused key and fill lighting create balanced natural color and controlled highlights. A realistic contact shadow grounds plausible proportions and a natural perspective. Show one complete product with crisp edges and authentic texture grounded only in the description. Place each described pattern, material, and detail only on its named component; leave unspecified surfaces plain and unbranded. Deliver a photography-only image with blank negative space for layout. Campaign typography and graphic overlays will be composited later outside this image.`;
-  if (index === 0) return `${imageBase} Composition A: a full-product three-quarter hero view, centered with the complete silhouette clearly readable and balanced breathing room around it.`;
-  if (index === 1) return `${imageBase} Composition B: a wider off-center studio frame, with the complete product slightly left of center and generous clear space to its right for a later headline.`;
-  return `${imageBase} Composition C: a closer alternate three-quarter angle, retaining the complete recognizable silhouette with clean space around its edges.`;
+  const composition = PRODUCT_IMAGE_COMPOSITIONS[Math.min(index, PRODUCT_IMAGE_COMPOSITIONS.length - 1)]!;
+  return buildProductImagePrompt({ product: campaign.product, audience: campaign.audience }, composition);
 }
 
 function defaultVariantPrompts(campaign: Campaign, mediaType: CreativeMediaType, count: number): string[] {
   return Array.from({ length: count }, (_, index) => variantDirection(campaign, mediaType, index));
-}
-
-function validHeadlines(value: string[]): boolean {
-  return value.length >= 2 && value.length <= 3 && value.every((line) => line.trim().length > 0 && line.trim().length <= 120) &&
-    new Set(value.map((line) => line.trim().toLocaleLowerCase())).size === value.length;
 }
 
 function validVariantPrompts(value: string[], count: number): boolean {
@@ -154,11 +152,20 @@ function validVariantPrompts(value: string[], count: number): boolean {
 
 function restoredHeadlines(current: string[], response: string[] | undefined, jobs: CreativeImageJob[], campaign: Campaign, authoritative = false): string[] {
   if (authoritative) return current;
-  if (validHeadlines(current)) return current;
-  if (response && validHeadlines(response)) return response;
-  if (validHeadlines(campaign.headlines)) return campaign.headlines;
-  const saved = jobs.find((job) => job.status === 'ready' && validHeadlines(job.headlines));
+  if (isStoredHeadlineSet(current)) return current;
+  if (response && isStoredHeadlineSet(response)) return response;
+  if (isStoredHeadlineSet(campaign.headlines)) return campaign.headlines;
+  const saved = jobs.find((job) => job.status === 'ready' && isStoredHeadlineSet(job.headlines));
   return saved?.headlines ?? [];
+}
+
+function headlineFieldError(value: string, index: number, values: string[]): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return 'Enter a headline.';
+  if (/[\p{Cc}\uFFFD]/u.test(trimmed)) return 'Remove control or replacement characters.';
+  if (countHeadlineCharacters(trimmed) > HEADLINE_MAX_LENGTH) return `Shorten this headline to ${HEADLINE_MAX_LENGTH} characters or fewer.`;
+  if (values.some((other, otherIndex) => otherIndex !== index && other.trim().toLocaleLowerCase() === trimmed.toLocaleLowerCase())) return 'Headlines must be unique.';
+  return null;
 }
 
 function hasActiveStatus(status: string | undefined): boolean {
@@ -172,6 +179,41 @@ function jobIsActive(job: CreativeImageJob): boolean {
 function jobIsReady(job: CreativeImageJob): boolean {
   if (job.visualMode === 'distinct') return Boolean(job.outputs?.length && job.outputs.every((output) => output.status === 'ready'));
   return job.status === 'ready';
+}
+
+function initialFeaturedJobId(jobs: CreativeImageJob[]): string | null {
+  // The endpoint list is sorted newest-first. On a fresh load, feature that
+  // request even if an older job is still processing; current-session POSTs
+  // replace this choice with their accepted id explicitly.
+  return jobs[0]?.id ?? null;
+}
+
+function readyViewerItems(job: CreativeImageJob): ViewerItem[] {
+  const variants = job.visualMode === 'distinct' && Array.isArray(job.outputs)
+    ? job.outputs.filter((output) => output.status === 'ready').map((output) => ({
+      index: output.index, headline: output.headline, assetId: output.id, imageUrl: output.imageUrl, videoUrl: output.videoUrl,
+    }))
+    : job.status === 'ready' ? job.headlines.map((headline, index) => ({
+      index, headline, assetId: job.id, imageUrl: job.imageUrl, videoUrl: job.videoUrl,
+    })) : [];
+
+  return variants.sort((a, b) => a.index - b.index).map((variant) => {
+    const label = variantLabel(variant.index);
+    const assetPath = `/api/creative-assets/${encodeURIComponent(variant.assetId)}`;
+    const kind = job.mediaType;
+    return {
+      kind,
+      src: kind === 'video' ? variant.videoUrl ?? assetPath : variant.imageUrl ?? assetPath,
+      title: `Version ${label} ${kind} draft`,
+      alt: `${kind === 'video' ? 'Video' : 'Generated image'} draft for Version ${label}`,
+      versionIndex: variant.index,
+    };
+  });
+}
+
+function revokeObjectUrls(urls: Set<string>): void {
+  for (const url of urls) URL.revokeObjectURL(url);
+  urls.clear();
 }
 
 function sameVideoOptions(first: CreativeVideoOptions | null, second: CreativeVideoOptions): boolean {
@@ -192,7 +234,8 @@ function draftFingerprint(headlines: string[], variantPrompts: string[], imagePr
 }
 
 interface StoredRequest { fingerprint: string; requestId: string }
-interface ViewerItem { kind: 'image' | 'video'; src: string; title: string; alt: string }
+interface ViewerItem { kind: 'image' | 'video'; src: string; title: string; alt: string; versionIndex: number }
+interface ViewerGallery { mode: 'original' | 'finished'; items: ViewerItem[]; index: number; token: number }
 
 function requestStorageKey(campaignId: string): string {
   return `riff:creative-request:${campaignId}`;
@@ -242,11 +285,15 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
   onUseForExperiment?: (job: CreativeImageJob, headlines: string[]) => void;
 }) {
   const [campaignStates, setCampaignStates] = useState<Record<string, ComposerState>>({});
-  const [viewer, setViewer] = useState<ViewerItem | null>(null);
+  const [viewer, setViewer] = useState<ViewerGallery | null>(null);
+  const [savedJobsOpen, setSavedJobsOpen] = useState(false);
+  const viewerGeneration = useRef(0);
+  const viewerObjectUrls = useRef(new Set<string>());
   const versionsDisclosureRef = useRef<HTMLDetailsElement | null>(null);
   const planControllers = useRef(new Map<string, AbortController>());
-  const seedHeadlines = initialHeadlines !== undefined ? initialHeadlines : validHeadlines(campaign.headlines) ? campaign.headlines : [];
-  const seedState = seedHeadlines.length || initialHeadlines !== undefined ? { ...EMPTY_STATE, headlines: seedHeadlines, variantPrompts: defaultVariantPrompts(campaign, EMPTY_STATE.mediaType, seedHeadlines.length), headlinesTouched: initialHeadlines !== undefined || validHeadlines(campaign.headlines) } : EMPTY_STATE;
+  const previousOverlong = useRef({ campaignId: campaign.id, value: false });
+  const seedHeadlines = initialHeadlines !== undefined ? initialHeadlines : isStoredHeadlineSet(campaign.headlines) ? campaign.headlines : [];
+  const seedState = seedHeadlines.length || initialHeadlines !== undefined ? { ...EMPTY_STATE, headlines: seedHeadlines, variantPrompts: defaultVariantPrompts(campaign, EMPTY_STATE.mediaType, seedHeadlines.length), headlinesTouched: initialHeadlines !== undefined || isStoredHeadlineSet(campaign.headlines) } : EMPTY_STATE;
   const state = campaignStates[campaign.id] ?? seedState;
   const updateCampaign = (campaignId: string, update: (current: ComposerState) => ComposerState) => {
     setCampaignStates((previous) => ({ ...previous, [campaignId]: update(previous[campaignId] ?? (campaignId === campaign.id ? seedState : EMPTY_STATE)) }));
@@ -255,18 +302,35 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
   const onHeadlinesChangeRef = useRef(onHeadlinesChange);
   onHeadlinesChangeRef.current = onHeadlinesChange;
   useEffect(() => {
-    if (state.loadStatus === 'ready' && (state.headlinesTouched || validHeadlines(state.headlines))) {
+    if (state.loadStatus === 'ready' && (state.headlinesTouched || isStoredHeadlineSet(state.headlines))) {
       onHeadlinesChangeRef.current?.(state.headlines);
     }
   }, [campaign.id, state.loadStatus, state.headlines, state.headlinesTouched]);
 
-  useEffect(() => { setViewer(null); }, [campaign.id]);
+  function closeViewer() {
+    viewerGeneration.current += 1;
+    revokeObjectUrls(viewerObjectUrls.current);
+    setViewer(null);
+  }
+
+  useEffect(() => { closeViewer(); setSavedJobsOpen(false); }, [campaign.id]);
+  useEffect(() => () => {
+    viewerGeneration.current += 1;
+    revokeObjectUrls(viewerObjectUrls.current);
+  }, []);
 
   useEffect(() => {
     if (state.manualEditing && state.headlines.length >= 2 && versionsDisclosureRef.current) {
       versionsDisclosureRef.current.open = true;
     }
   }, [campaign.id, state.manualEditing, state.headlines.length]);
+
+  useEffect(() => {
+    if (previousOverlong.current.campaignId !== campaign.id) previousOverlong.current = { campaignId: campaign.id, value: false };
+    const overlong = state.loadStatus === 'ready' && state.headlines.some((line) => countHeadlineCharacters(line) > HEADLINE_MAX_LENGTH);
+    if (overlong && !previousOverlong.current.value && versionsDisclosureRef.current) versionsDisclosureRef.current.open = true;
+    previousOverlong.current.value = overlong;
+  }, [campaign.id, state.loadStatus, state.headlines]);
 
   useEffect(() => {
     const campaignId = campaign.id;
@@ -287,6 +351,7 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
             imagePromptSuggestion: result.imagePromptSuggestion,
             imagePrompt: current.promptEdited ? current.imagePrompt : result.imagePromptSuggestion,
             jobs,
+            featuredJobId: current.featuredJobId ?? (current.generationLoading ? null : initialFeaturedJobId(jobs)),
             headlines,
             variantPrompts: current.variantPrompts.length === headlines.length ? current.variantPrompts : defaultVariantPrompts(campaign, current.mediaType, headlines.length),
             capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true },
@@ -318,7 +383,7 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
         const result = await getJson<{ jobs: CreativeImageJob[] }>(`/api/campaigns/${encodeURIComponent(campaignId)}/creative`, controller.signal);
         if (!Array.isArray(result.jobs)) return;
         const jobs = result.jobs.filter((job) => isCreativeJob(job, campaignId)).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-        updateCampaign(campaignId, (current) => ({ ...current, jobs }));
+        updateCampaign(campaignId, (current) => ({ ...current, jobs, featuredJobId: current.featuredJobId ?? (current.generationLoading ? null : initialFeaturedJobId(jobs)) }));
       } catch {
         // Keep showing the latest saved output and let the next bounded poll retry.
       } finally {
@@ -333,13 +398,14 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
   const fingerprint = useMemo(() => draftFingerprint(state.headlines, promptsForState, state.imagePrompt, state.mediaType, state.videoOptions), [state.headlines, promptsForState, state.imagePrompt, state.mediaType, state.videoOptions]);
   const matchingJob = state.jobs.find((job) => sameDraft(job, state.headlines, promptsForState, state.imagePrompt, state.mediaType, state.videoOptions));
   const activeJob = state.jobs.find(jobIsActive);
-  const activeJobCount = state.jobs.filter(jobIsActive).length;
-  const issueJobCount = state.jobs.filter((job) => job.status === 'failed' || job.status === 'uncertain' ||
-    job.outputs?.some((output) => output.status === 'failed' || output.status === 'uncertain')).length;
-  const readyJobCount = state.jobs.filter(jobIsReady).length;
   const uncertainOtherJob = state.jobs.find((job) => job.status === 'uncertain' && !sameDraft(job, state.headlines, promptsForState, state.imagePrompt, state.mediaType, state.videoOptions));
+  const featuredJob = state.featuredJobId ? state.jobs.find((job) => job.id === state.featuredJobId) ?? null : null;
+  const archivedJobs = state.jobs.filter((job) => job.id !== state.featuredJobId);
+  const archivedActiveCount = archivedJobs.filter(jobIsActive).length;
+  const archivedIssueCount = archivedJobs.filter((job) => job.status === 'failed' || job.status === 'uncertain' || job.outputs?.some((output) => output.status === 'failed' || output.status === 'uncertain')).length;
+  const archivedReadyCount = archivedJobs.filter(jobIsReady).length;
   const sameDraftComplete = matchingJob ? jobIsReady(matchingJob) : false;
-  const headlinesValid = validHeadlines(state.headlines);
+  const headlinesValid = isValidHeadlineSet(state.headlines);
   const promptValid = state.imagePrompt.trim().length > 0 && state.imagePrompt.trim().length <= 4_000;
   const unresolvedForDraft = matchingJob && (matchingJob.status === 'uncertain' || matchingJob.status === 'failed') && !storedRequest(campaign.id, fingerprint);
   const mediaAvailable = state.capabilities[state.mediaType];
@@ -386,7 +452,7 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
       updateCampaign(campaignId, (current) => {
         const restored = restoredHeadlines(current.headlines, result.headlines, jobs, campaign, current.headlinesTouched);
         const nextPrompts = current.variantPrompts.length === restored.length ? current.variantPrompts : defaultVariantPrompts(campaign, current.mediaType, restored.length);
-        return { ...current, loadStatus: 'ready', loadError: '', imagePromptSuggestion: result.imagePromptSuggestion, imagePrompt: current.promptEdited ? current.imagePrompt : result.imagePromptSuggestion, jobs, headlines: restored, variantPrompts: nextPrompts, capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true } };
+        return { ...current, loadStatus: 'ready', loadError: '', imagePromptSuggestion: result.imagePromptSuggestion, imagePrompt: current.promptEdited ? current.imagePrompt : result.imagePromptSuggestion, jobs, featuredJobId: current.featuredJobId ?? (current.generationLoading ? null : initialFeaturedJobId(jobs)), headlines: restored, variantPrompts: nextPrompts, capabilities: { image: result.capabilities?.image !== false, video: result.capabilities?.video === true } };
       });
     } catch (error) {
       updateCampaign(campaignId, (current) => ({ ...current, loadStatus: 'error', loadError: error instanceof Error ? error.message : 'Creative drafts could not be loaded.' }));
@@ -412,7 +478,7 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
       if (previous) clearStoredRequest(campaignId, requestFingerprint, previous.requestId);
     }
     const requestId = createOrReuseRequestId(campaignId, requestFingerprint);
-    updateCampaign(campaignId, (current) => ({ ...current, generationLoading: true, generationError: '' }));
+    updateCampaign(campaignId, (current) => ({ ...current, generationLoading: true, generationError: '', featuredJobId: null }));
     try {
       const path = mediaType === 'video' ? 'videos' : 'images';
       const body = mediaType === 'video' ? { requestId, headlines, imagePrompt, variantPrompts, videoOptions: state.videoOptions } : { requestId, headlines, imagePrompt, variantPrompts };
@@ -422,12 +488,97 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
         ...current,
         generationLoading: false,
         generationError: result.job.error ?? '',
+        featuredJobId: result.job.id,
         jobs: [result.job, ...current.jobs.filter((job) => job.id !== result.job.id)].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       }));
       if (jobIsReady(result.job)) clearStoredRequest(campaignId, requestFingerprint, requestId);
     } catch (error) {
       updateCampaign(campaignId, (current) => ({ ...current, generationLoading: false, generationError: error instanceof Error ? error.message : 'The creative request did not return a result. Reuse the same request to check its status.' }));
     }
+  }
+
+  function openOriginalGallery(job: CreativeImageJob, versionIndex: number) {
+    const token = ++viewerGeneration.current;
+    revokeObjectUrls(viewerObjectUrls.current);
+    const items = readyViewerItems(job);
+    const index = items.findIndex((item) => item.versionIndex === versionIndex);
+    if (index >= 0) setViewer({ mode: 'original', items, index, token });
+  }
+
+  function openFinishedGallery(previewUrl: string, job: CreativeImageJob, versionIndex: number) {
+    const token = ++viewerGeneration.current;
+    revokeObjectUrls(viewerObjectUrls.current);
+    const readyItems = readyViewerItems(job).filter((item) => item.kind === 'image');
+    const current = readyItems.find((item) => item.versionIndex === versionIndex);
+    if (!current) {
+      URL.revokeObjectURL(previewUrl);
+      return;
+    }
+
+    viewerObjectUrls.current.add(previewUrl);
+    const currentItem = { ...current, src: previewUrl, title: `Finished ad for Version ${variantLabel(current.versionIndex)}`, alt: `Portrait ad with headline ${job.visualMode === 'distinct' ? job.outputs?.find((output) => output.index === current.versionIndex)?.headline ?? '' : job.headlines[current.versionIndex] ?? ''} and CTA Join the waitlist.` };
+    setViewer({ mode: 'finished', items: [currentItem], index: 0, token });
+
+    void (async () => {
+      const composed = new Map<number, Blob>();
+      for (const item of readyItems) {
+        if (item.versionIndex === versionIndex) continue;
+        try {
+          const image = await loadFinishedAdImage(item.src);
+          if (viewerGeneration.current !== token) return;
+          const canvas = document.createElement('canvas');
+          drawFinishedAd(canvas, image, job.visualMode === 'distinct'
+            ? job.outputs?.find((output) => output.index === item.versionIndex)?.headline ?? ''
+            : job.headlines[item.versionIndex] ?? '');
+          const blob = await finishedAdPngBlob(canvas);
+          if (viewerGeneration.current !== token) return;
+          composed.set(item.versionIndex, blob);
+        } catch {
+          // Keep the inspected version available if another ready photo cannot be composed.
+        }
+      }
+      if (viewerGeneration.current !== token) return;
+
+      const createdUrls = new Set<string>();
+      let items: ViewerItem[];
+      try {
+        items = readyItems.flatMap((item) => {
+          if (item.versionIndex === versionIndex) return [currentItem];
+          const blob = composed.get(item.versionIndex);
+          if (!blob) return [];
+          const src = URL.createObjectURL(blob);
+          createdUrls.add(src);
+          const headline = job.visualMode === 'distinct'
+            ? job.outputs?.find((output) => output.index === item.versionIndex)?.headline ?? ''
+            : job.headlines[item.versionIndex] ?? '';
+          return [{
+            ...item,
+            src,
+            title: `Finished ad for Version ${variantLabel(item.versionIndex)}`,
+            alt: `Portrait ad with headline ${headline} and CTA Join the waitlist.`,
+          }];
+        });
+      } catch {
+        revokeObjectUrls(createdUrls);
+        return;
+      }
+      if (viewerGeneration.current !== token) {
+        revokeObjectUrls(createdUrls);
+        return;
+      }
+
+      for (const url of createdUrls) viewerObjectUrls.current.add(url);
+      const index = items.findIndex((item) => item.versionIndex === versionIndex);
+      setViewer((previous) => previous?.token === token ? { ...previous, items, index: Math.max(0, index) } : previous);
+    })();
+  }
+
+  function moveViewer(delta: -1 | 1) {
+    setViewer((current) => {
+      if (!current) return current;
+      const next = current.index + delta;
+      return next < 0 || next >= current.items.length ? current : { ...current, index: next };
+    });
   }
 
   function updateHeadline(index: number, value: string) {
@@ -505,13 +656,19 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
             </summary>
             <div className="saved-creative-content version-disclosure-content">
               <div className="headline-editor" aria-label="Editable headline drafts">
-                {state.headlines.map((headline, index) => <label className="composer-field" key={index}>
-                  <span><b>Version {variantLabel(index)}</b><small>{headline.trim().length}/120</small></span>
-                  <div className="headline-input-row">
-                    <input value={headline} maxLength={120} onChange={(event) => updateHeadline(index, event.target.value)} aria-label={`Version ${variantLabel(index)} headline`} disabled={editingDisabled || state.loadStatus !== 'ready'} />
-                    {state.headlines.length > 2 && <button type="button" className="icon-button composer-remove" aria-label={`Remove version ${variantLabel(index)}`} onClick={() => removeHeadline(index)} disabled={editingDisabled}><X size={15} /></button>}
-                  </div>
-                </label>)}
+                {state.headlines.map((headline, index) => {
+                  const fieldError = headlineFieldError(headline, index, state.headlines);
+                  const counterId = `headline-counter-${index}`;
+                  const errorId = `headline-error-${index}`;
+                  return <label className="composer-field" key={index}>
+                    <span><b>Version {variantLabel(index)}</b><small id={counterId}>{countHeadlineCharacters(headline)}/{HEADLINE_MAX_LENGTH}</small></span>
+                    <div className="headline-input-row">
+                      <input value={headline} onChange={(event) => updateHeadline(index, event.target.value)} aria-label={`Version ${variantLabel(index)} headline`} aria-invalid={Boolean(fieldError)} aria-describedby={fieldError ? `${counterId} ${errorId}` : counterId} disabled={editingDisabled || state.loadStatus !== 'ready'} />
+                      {state.headlines.length > 2 && <button type="button" className="icon-button composer-remove" aria-label={`Remove version ${variantLabel(index)}`} onClick={() => removeHeadline(index)} disabled={editingDisabled}><X size={15} /></button>}
+                    </div>
+                    {fieldError && <small id={errorId} className="composer-field-error">{fieldError}</small>}
+                  </label>;
+                })}
                 {state.headlines.length < 3 && <button className="composer-add" type="button" onClick={addHeadline} disabled={editingDisabled}><Plus size={14} /> Add another headline</button>}
               </div>
               <fieldset className="variant-prompt-editor">
@@ -545,7 +702,9 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
             </button>
             <span>Uses BFL credits · {state.headlines.length} separate {state.mediaType} requests, one per version</span>
           </div>
-          {!headlinesValid && <p className="composer-guidance">Generation needs 2–3 unique, non-empty headlines. {state.headlines.length >= 2 ? 'Open Versions to fix them.' : 'Suggest them with Liquid or enter them manually.'}</p>}
+          {!headlinesValid && <p className="composer-guidance">{state.headlines.length >= 2
+            ? `Use 2–3 unique headlines, up to ${HEADLINE_MAX_LENGTH} characters each. Remove control characters and open Versions to fix them.`
+            : 'Suggest headlines with Liquid or enter 2–3 manually.'}</p>}
           {headlinesValid && !validVariantPrompts(promptsForState, state.headlines.length) && <p className="composer-guidance">One or more directions need attention. Open Versions to fix them before generating.</p>}
           {headlinesValid && !promptValid && <p className="composer-guidance">The saved campaign visual context is missing. Reload creative settings before generating.</p>}
           {headlinesValid && <p className="composer-guidance">Review each headline before generation. Persona experiments judge the copy only, not the pixels or video.</p>}
@@ -553,34 +712,67 @@ export default function CreativeComposer({ campaign, initialHeadlines, selectedC
 
         <aside className="composer-side-note">
           <span className="composer-side-icon"><ImagePlus size={18} /></span>
-          <strong>A reviewable draft, not a live ad</strong>
-          <p>Riff saves the generated {state.mediaType} concept with the reviewed headlines. It does not create an ad, publish anything, allocate traffic, or collect analytics.</p>
+          <strong>{state.mediaType === 'image' ? 'A finished layout, ready to review' : 'A video draft, ready to review'}</strong>
+          <p>{state.mediaType === 'image' ? 'Each saved photo can become a portrait ad with your exact headline and a call-to-action. Inspect it at full size, then download the PNG when you are happy with it.' : 'Riff saves the generated video with your reviewed headline. Watch each version before using it in a campaign.'}</p>
           <div><ArrowDownToLine size={14} /> Saved jobs can be reopened from this campaign.</div>
         </aside>
       </div>
 
-      {state.jobs.length > 0 && <details className="image-job-list" aria-label="Saved creative drafts"
+      <section className="current-generation" aria-label="Latest creative">
+        <div className="current-generation-heading">
+          <div><span className="section-kicker">LATEST CREATIVE</span><h3>Current generation</h3></div>
+          {featuredJob && <span className={`current-generation-badge current-generation-${featuredJob.status}`}>{featuredJob.status === 'ready' ? 'Ready' : featuredJob.status === 'failed' ? 'Needs attention' : featuredJob.status === 'uncertain' ? 'Outcome uncertain' : 'In progress'}</span>}
+          {!featuredJob && state.generationLoading && <span className="current-generation-badge current-generation-loading">Submitting</span>}
+        </div>
+        {featuredJob
+          ? <SavedCreativeJob job={featuredJob} expanded selected={selectedCreativeJobId === featuredJob.id}
+            onUse={() => onUseForExperiment?.(featuredJob, featuredJob.headlines)}
+            onInspectFinished={openFinishedGallery}
+            onOpen={(job, index) => {
+              document.querySelectorAll<HTMLVideoElement>('.image-ad-card video').forEach((video) => video.pause());
+              openOriginalGallery(job, index);
+            }} />
+          : state.generationLoading
+            ? <p className="current-generation-message" role="status"><LoaderCircle size={15} className="spin" /> Waiting for the provider to accept this generation. Its versions will appear here as soon as the job is saved.</p>
+            : state.loadStatus === 'loading'
+              ? <p className="current-generation-message" role="status">Checking saved generations for this campaign…</p>
+              : state.loadStatus === 'error'
+                ? <p className="current-generation-message" role="status">Saved generations could not be loaded. Reload saved jobs to check the latest result.</p>
+                : state.featuredJobId
+                  ? <p className="current-generation-message" role="status">The accepted generation is not in this response yet. Reload saved jobs to check its status.</p>
+                  : <p className="current-generation-message">Generated versions will appear here, with partial results shown while other versions finish.</p>}
+      </section>
+
+      {archivedJobs.length > 0 && <details key={campaign.id} className="image-job-list" aria-label="Saved creative drafts"
         onToggle={(event) => {
+          setSavedJobsOpen(event.currentTarget.open);
           if (!event.currentTarget.open) document.querySelectorAll<HTMLVideoElement>('.image-ad-card video').forEach((video) => video.pause());
         }}>
         <summary className="saved-creative-summary">
           <span className="saved-creative-summary-title">Saved creative drafts</span>
-          <span className="saved-creative-summary-count">{state.jobs.length} {state.jobs.length === 1 ? 'job' : 'jobs'}</span>
+          <span className="saved-creative-summary-count">{archivedJobs.length} {archivedJobs.length === 1 ? 'job' : 'jobs'}</span>
           <span className="saved-creative-summary-status">
-            {activeJobCount > 0 && <>{activeJobCount} processing{issueJobCount > 0 ? ' · ' : ''}</>}
-            {issueJobCount > 0 ? `${issueJobCount} need attention` : activeJobCount === 0 ? `${readyJobCount} ready` : ''}
+            {archivedActiveCount > 0 && <>{archivedActiveCount} processing{archivedIssueCount > 0 ? ' · ' : ''}</>}
+            {archivedIssueCount > 0 ? `${archivedIssueCount} need attention` : archivedActiveCount === 0 ? `${archivedReadyCount} ready` : ''}
           </span>
         </summary>
         <div className="saved-creative-content">
-          {state.jobs.map((job) => <SavedCreativeJob key={job.id} job={job} selected={selectedCreativeJobId === job.id}
+          {archivedJobs.map((job) => <SavedCreativeJob key={job.id} job={job} expanded={savedJobsOpen} selected={isValidHeadlineSet(job.headlines) && selectedCreativeJobId === job.id}
             onUse={() => onUseForExperiment?.(job, job.headlines)}
-            onOpen={(item) => {
+            onInspectFinished={openFinishedGallery}
+            onOpen={(job, index) => {
               document.querySelectorAll<HTMLVideoElement>('.image-ad-card video').forEach((video) => video.pause());
-              setViewer(item);
+              openOriginalGallery(job, index);
             }} />)}
         </div>
       </details>}
-      {viewer && <CreativeMediaViewer kind={viewer.kind} src={viewer.src} title={viewer.title} alt={viewer.alt} onClose={() => setViewer(null)} />}
+      {viewer && viewer.items[viewer.index] && <CreativeMediaViewer
+        kind={viewer.items[viewer.index]!.kind}
+        src={viewer.items[viewer.index]!.src}
+        title={viewer.items[viewer.index]!.title}
+        alt={viewer.items[viewer.index]!.alt}
+        navigation={viewer.items.length > 1 ? { index: viewer.index, count: viewer.items.length, onPrevious: () => moveViewer(-1), onNext: () => moveViewer(1) } : undefined}
+        onClose={closeViewer} />}
     </section>
   );
 }
@@ -596,11 +788,13 @@ interface DraftVariant {
   assetId: string;
 }
 
-function SavedCreativeJob({ job, selected, onUse, onOpen }: {
+function SavedCreativeJob({ job, expanded, selected, onUse, onOpen, onInspectFinished }: {
   job: CreativeImageJob;
+  expanded: boolean;
   selected: boolean;
   onUse?: () => void;
-  onOpen: (item: ViewerItem) => void;
+  onOpen: (job: CreativeImageJob, versionIndex: number) => void;
+  onInspectFinished: (previewUrl: string, job: CreativeImageJob, versionIndex: number) => void;
 }) {
   const distinct = job.visualMode === 'distinct' && Array.isArray(job.outputs);
   const variants: DraftVariant[] = distinct
@@ -610,7 +804,11 @@ function SavedCreativeJob({ job, selected, onUse, onOpen }: {
       imageUrl: job.imageUrl, videoUrl: job.videoUrl, error: job.error, assetId: job.id,
     })) : [];
   const completedCount = variants.filter((variant) => variant.status === 'ready').length;
-  const canUse = onUse && jobIsReady(job);
+  const headlineSetValid = isValidHeadlineSet(job.headlines);
+  const canUse = onUse && jobIsReady(job) && headlineSetValid;
+  const selectionProblem = job.headlines.some((headline) => countHeadlineCharacters(headline) > HEADLINE_MAX_LENGTH)
+    ? `Saved captions exceed the current ${HEADLINE_MAX_LENGTH}-character limit and cannot be attached to an experiment.`
+    : `Saved captions need 2–3 unique, non-empty headlines of up to ${HEADLINE_MAX_LENGTH} characters before they can be attached.`;
   return <article className="image-job">
     <div className="image-job-top">
       <div><strong>{job.mediaType === 'video' ? 'Video draft' : 'Image draft'}</strong><span className={`job-status job-${job.status}`}><i />{job.status === 'ready' ? 'Ready' : job.status === 'failed' ? 'Some requests failed' : job.status === 'uncertain' ? 'Outcome uncertain' : 'Generating'}</span></div>
@@ -627,12 +825,15 @@ function SavedCreativeJob({ job, selected, onUse, onOpen }: {
       return <article className={`image-ad-card output-${variant.status}`} key={`${job.id}-${variant.index}`}>
         <div className="image-ad-label">Version {label} <span>{variant.status === 'ready' ? 'Draft concept' : outputStatusLabel(variant.status)}</span></div>
         {variant.status === 'ready' ? <>
-          {kind === 'video' ? <video controls preload="metadata" src={src} aria-label={alt} /> : <img src={src} alt={alt} loading="lazy" />}
-          <h4>{variant.headline}</h4><div className="mock-cta">Join the waitlist</div>
+          {kind === 'video' ? <video controls preload="metadata" src={src} aria-label={alt} /> : !expanded ? <img className="image-ad-source" src={src} alt={alt} loading="lazy" /> : null}
+          <h4>{variant.headline}</h4>
+          {(kind === 'video' || !expanded) && <div className="mock-cta">Join the waitlist</div>}
           <p>Review before use · {distinct ? 'distinct' : 'shared'} {kind}</p>
+          {kind === 'image' && expanded && <AdImagePreview imageUrl={src} headline={variant.headline} versionLabel={label}
+            onInspect={(previewUrl) => onInspectFinished(previewUrl, job, variant.index)} />}
           <button className="media-open-button" type="button" aria-label={`${kind === 'video' ? 'Watch video' : 'View image'} for Version ${label}`} onClick={() => {
             document.querySelectorAll<HTMLVideoElement>('.image-ad-card video').forEach((video) => video.pause());
-            onOpen({ kind, src, title, alt });
+            onOpen(job, variant.index);
           }}>{kind === 'video' ? <Play size={13} /> : <Eye size={13} />} {kind === 'video' ? 'Watch video' : 'View image'}</button>
         </> : <div className="output-pending" role="status">
           <span>{outputStatusLabel(variant.status)}</span>
@@ -644,8 +845,9 @@ function SavedCreativeJob({ job, selected, onUse, onOpen }: {
       {job.status === 'failed' ? job.error || 'This creative request failed. Edit the visual direction or copy to start a distinct draft.' : job.status === 'uncertain' ? job.error || 'The creative service did not confirm whether it completed. Reload saved jobs before starting another draft.' : 'The creative request is still being processed. Reload saved jobs to check again.'}
     </div>}
     {!distinct && <details className="job-direction"><summary>Shared visual direction</summary><p>{job.imagePrompt}</p></details>}
-    {canUse && <div className="creative-experiment-select">
-      <button type="button" className={selected ? 'button button-secondary' : 'button button-primary'} aria-pressed={selected} onClick={onUse}>{selected ? 'Selected' : 'Select for experiment'}</button>
+    {onUse && jobIsReady(job) && <div className="creative-experiment-select">
+      <button type="button" className={selected ? 'button button-secondary' : 'button button-primary'} aria-pressed={selected} aria-describedby={!headlineSetValid ? `saved-headline-limit-${job.id}` : undefined} disabled={!canUse} onClick={onUse}>{selected ? 'Selected' : 'Select for experiment'}</button>
+      {!headlineSetValid && <p id={`saved-headline-limit-${job.id}`} className="composer-guidance">{selectionProblem}</p>}
     </div>}
     {distinct && !jobIsReady(job) && <p className="composer-guidance">A partial result can be reviewed above. Wait until every version is ready before attaching it to an experiment.</p>}
   </article>;

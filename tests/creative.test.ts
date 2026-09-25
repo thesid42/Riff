@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import type { CreativeImageJob } from '../shared/creative.js';
+import { buildProductImagePrompt } from '../shared/image-prompts.js';
 import { BflVideoClient, createProviders, getIntegrationStatuses, type BflClient, type LiquidClient } from '../server/providers/index.js';
 import { ProviderError } from '../server/providers/index.js';
 import { createApp } from '../server/app.js';
@@ -79,10 +80,9 @@ describe('creative composer API', () => {
     const get = await app.inject({ method: 'GET', url: `/api/campaigns/${id}/creative` });
     expect(get.statusCode).toBe(200);
     expect(get.json()).toMatchObject({ jobs: [] });
+    expect(get.json().imagePromptSuggestion).toBe(buildProductImagePrompt({ product: campaignInput.product, audience: campaignInput.audience }, 'hero'));
     expect(get.json().imagePromptSuggestion).toContain(campaignInput.product);
-    expect(get.json().imagePromptSuggestion).toContain(campaignInput.audience);
-    expect(get.json().imagePromptSuggestion).toContain('neutral backdrop');
-    expect(get.json().imagePromptSuggestion).toContain('unbranded');
+    expect(get.json().imagePromptSuggestion.length).toBeLessThanOrEqual(4_000);
     expect(fixture.bfl.submit).not.toHaveBeenCalled();
     expect(fixture.bfl.poll).not.toHaveBeenCalled();
 
@@ -119,6 +119,9 @@ describe('creative composer API', () => {
 
     const bad = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: { ...imageRequest, headlines: ['Same', 'same'] } });
     expect(bad.statusCode).toBe(400);
+    const longHeadline = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: { ...imageRequest, headlines: ['x'.repeat(61), 'A normal headline'] } });
+    expect(longHeadline.statusCode).toBe(400);
+    expect(JSON.stringify(longHeadline.json())).toContain('60 characters');
     const malformed = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/creative/images`, payload: { ...imageRequest, imagePrompt: 'x'.repeat(4_001) } });
     expect(malformed.statusCode).toBe(400);
     expect(fixture.bfl.submit).not.toHaveBeenCalled();

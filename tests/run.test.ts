@@ -185,6 +185,23 @@ describe('persona wave', () => {
     expect(added.json().campaign.customPersonas[0].location).toBe('Madrid');
   });
 
+  it('rejects manually submitted headlines over 60 characters with a clear message', async () => {
+    const created = await app.inject({
+      method: 'POST', url: '/api/campaigns',
+      payload: { name: 'Bottle', product: 'Bottle', audience: 'Commuters', approvedClaims: ['750 ml'], budgetCents: 5000 },
+    });
+    const id = created.json().campaign.id as string;
+    const tooLong = 'x'.repeat(61);
+
+    const saved = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/headlines`, payload: { headlines: [tooLong, 'A normal headline'] } });
+    expect(saved.statusCode).toBe(400);
+    expect(saved.json().error.message).toContain('60 characters');
+
+    const started = await app.inject({ method: 'POST', url: `/api/campaigns/${id}/run`, payload: { agentCount: 8, headlines: [tooLong, 'A normal headline'] } });
+    expect(started.statusCode).toBe(400);
+    expect(started.json().error.message).toContain('60 characters');
+  });
+
   it('maps an explicitly selected creative batch to exact headline order and leaves later unselected waves text-only', async () => {
     await app.close();
     const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);

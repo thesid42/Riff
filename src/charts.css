@@ -1,0 +1,45 @@
+.chart-panel.chart-panel-explained { min-height: 0; min-width: 0; }
+.chart-panel-explained .panel-heading { margin-bottom: 4px; }
+.chart-panel-explained .panel-heading h2 { margin-top: 5px; }
+.chart-panel-explained .panel-heading p { max-width: 460px; margin: 5px 0 0; color: #68756a; font-size: 12px; line-height: 1.45; }
+.signup-chart { display: flex; flex-direction: column; gap: 9px; min-width: 0; margin-top: 8px; }
+.signup-chart-scope, .signup-chart-takeaway { margin: 0; color: #526057; font-size: 12px; line-height: 1.45; }
+.signup-chart-scope { color: #68756a; }
+.signup-chart-takeaway { padding: 8px 10px; border-left: 3px solid #6b916d; border-radius: 0 7px 7px 0; background: #f4f7f2; }
+.signup-chart-figure { min-width: 0; max-width: 100%; margin: 0; overflow-x: auto; overscroll-behavior-inline: contain; }
+.signup-chart-svg { display: block; width: 100%; min-width: 600px; height: auto; min-height: 220px; overflow: visible; }
+.signup-grid-line { stroke: #e6ebe5; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.signup-axis-line, .signup-tick-line { stroke: #9ca99d; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.signup-tick-label { fill: #58665b; font: 18px system-ui, sans-serif; }
+.signup-axis-title { fill: #405045; font: 600 18px system-ui, sans-serif; }
+.signup-series-line { fill: none; stroke-width: 2.7; stroke-linejoin: round; stroke-linecap: round; vector-effect: non-scaling-stroke; }
+.signup-series-point { stroke: white; stroke-width: 2; vector-effect: non-scaling-stroke; }
+.signup-series-line.signup-series-a { stroke: #426d49; fill: none; }
+.signup-series-point.signup-series-a { stroke: #426d49; fill: #426d49; }
+.signup-series-line.signup-series-b { stroke: #356d86; fill: none; stroke-dasharray: 7 4; }
+.signup-series-point.signup-series-b { stroke: #356d86; fill: #356d86; }
+.signup-series-line.signup-series-c { stroke: #996522; fill: none; stroke-dasharray: 2 4; }
+.signup-series-point.signup-series-c { stroke: #996522; fill: #996522; }
+.signup-series-line.signup-series-other { stroke: #735f7d; fill: none; stroke-dasharray: 10 4 2 4; }
+.signup-series-point.signup-series-other { stroke: #735f7d; fill: #735f7d; }
+.signup-results-table-wrap { max-width: 100%; overflow-x: auto; border-top: 1px solid #edf0ec; padding-top: 4px; }
+.signup-results-table { width: 100%; border-collapse: collapse; color: #344239; font-size: 14px; line-height: 1.4; }
+.signup-results-table caption { padding: 5px 0 7px; color: #58665b; font-size: 12px; font-weight: 700; text-align: left; }
+.signup-results-table th, .signup-results-table td { padding: 6px 7px; border-top: 1px solid #edf0ec; text-align: left; vertical-align: top; }
+.signup-results-table thead th { color: #68756a; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.signup-results-table tbody th { white-space: nowrap; }
+.signup-results-table td:nth-child(3) { font-variant-numeric: tabular-nums; font-weight: 700; white-space: nowrap; }
+.signup-key { display: inline-block; width: 18px; height: 3px; margin: 0 7px 3px 0; border-radius: 2px; vertical-align: middle; }
+.signup-key-a { background: #426d49; }
+.signup-key-b { background: repeating-linear-gradient(to right, #356d86 0 6px, transparent 6px 9px); }
+.signup-key-c { background: repeating-linear-gradient(to right, #996522 0 2px, transparent 2px 5px); }
+.signup-key-other { background: repeating-linear-gradient(to right, #735f7d 0 6px, transparent 6px 8px, #735f7d 8px 10px, transparent 10px 13px); }
+.signup-chart-empty { min-height: 140px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; padding: 18px; color: #58665b; text-align: center; }
+.signup-chart-empty strong { color: #405045; font-size: 14px; }
+.signup-chart-empty span { max-width: 320px; font-size: 12px; line-height: 1.45; }
+.chart-panel-explained .chart-footnote { margin-top: 4px; }
+
+@media (max-width: 560px) {
+  .signup-chart-svg { min-height: 220px; }
+  .signup-results-table { min-width: 520px; }
+}

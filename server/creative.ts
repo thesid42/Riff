@@ -3,6 +3,7 @@ import { mkdir, open, readFile, rm, stat } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import type { Campaign } from '../shared/types.js';
 import type { CreativeImageJob, CreativeImageJobStatus, CreativeImageRequest, CreativeVariantOutputStatus, CreativeVideoOptions, CreativeVideoRequest } from '../shared/creative.js';
+import { buildProductImagePrompt } from '../shared/image-prompts.js';
 import { ProviderError, type BflClient, type LiquidClient } from './providers/index.js';
 import { CampaignDatabase, type StoredCreativeImageJob, type StoredCreativeVariantOutput } from './database.js';
 
@@ -382,7 +383,7 @@ export class CreativeServiceError extends Error {
 }
 
 export function suggestImagePrompt(campaign: Campaign): string {
-  return `Create a polished, factual advertising image for ${campaign.product}, intended for ${campaign.audience}. Show a plain unbranded product in an uncluttered composition against a clean neutral backdrop with soft studio lighting. Leave generous clear space for headline text to be added later; keep the scene accurate and free of unapproved claims.`;
+  return buildProductImagePrompt({ product: campaign.product, audience: campaign.audience }, 'hero');
 }
 
 function publicCreativeJob(job: StoredCreativeImageJob): CreativeImageJob {

@@ -1,0 +1,187 @@
+.experiment-wave { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.experiment-wave .wave-heading { margin: 0 0 2px; }
+.experiment-wave .wave-heading p { max-width: 34rem; font-size: 13px; line-height: 1.45; }
+.experiment-wave .status-pill { flex: 0 0 auto; }
+
+.experiment-brief {
+  min-width: 0;
+  padding: 15px;
+  border: 1px solid #e4ebe1;
+  border-radius: 12px;
+  background: #fbfcfa;
+}
+.experiment-brief-heading, .experiment-results-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.experiment-brief-heading h3, .experiment-results-heading h3 {
+  margin: 4px 0 0;
+  color: #304036;
+  font: 700 16px/1.3 'Manrope', sans-serif;
+}
+.experiment-audience-count, .experiment-result-count {
+  color: #5f6d61;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: right;
+}
+.experiment-headline-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr));
+  gap: 8px;
+  margin: 13px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.experiment-headline-list li {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 9px;
+  padding: 10px 11px;
+  border: 1px solid #e8ede6;
+  border-radius: 9px;
+  background: #fff;
+}
+.experiment-headline-list li > span {
+  display: grid;
+  width: 23px;
+  height: 23px;
+  flex: 0 0 23px;
+  place-items: center;
+  border-radius: 50%;
+  color: #436a49;
+  background: #edf4eb;
+  font-size: 12px;
+  font-weight: 700;
+}
+.experiment-headline-list li p {
+  min-width: 0;
+  margin: 1px 0 0;
+  color: #344239;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.experiment-headline-guidance, .experiment-copy-note, .experiment-helper, .experiment-start-guidance, .experiment-catalog-note {
+  margin: 10px 0 0;
+  color: #657267;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.experiment-headline-guidance { color: #765d3a; }
+.experiment-copy-note { margin-top: 12px; }
+.experiment-wave .wave-visual-note { margin-top: 8px; }
+.experiment-wave .wave-visual-note .text-button { margin-left: 6px; }
+
+.experiment-run-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 0 1px;
+}
+.experiment-audience-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  color: #536057;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.experiment-audience-summary svg { flex: 0 0 auto; color: #638267; }
+.experiment-start-guidance { margin: -5px 0 0; color: #765d3a; }
+
+.experiment-disclosure {
+  min-width: 0;
+  border: 1px solid #e7ece5;
+  border-radius: 10px;
+  background: #fff;
+}
+.experiment-disclosure > summary {
+  display: flex;
+  min-height: 43px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  color: #405045;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  list-style: none;
+}
+.experiment-disclosure > summary::-webkit-details-marker { display: none; }
+.experiment-disclosure > summary::after {
+  order: 2;
+  color: #748175;
+  content: '+';
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1;
+}
+.experiment-disclosure[open] > summary::after { content: '−'; }
+.experiment-disclosure > summary:focus-visible { outline: 2px solid #6e916d; outline-offset: 2px; border-radius: 8px; }
+.experiment-disclosure > summary small {
+  margin-left: auto;
+  color: #778278;
+  font-size: 12px;
+  font-weight: 500;
+  text-align: right;
+}
+.experiment-disclosure-body, .experiment-settings-grid { padding: 0 12px 13px; }
+.experiment-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.experiment-settings-grid .composer-field { margin: 0; }
+.experiment-disclosure .persona-filters { margin-top: 3px; }
+.experiment-disclosure .persona-filter-actions { margin-top: 10px; }
+.experiment-disclosure .profile-mix { margin-top: 12px; }
+.experiment-disclosure .persona-create { margin: 0; padding: 0; border: 0; }
+.experiment-disclosure .persona-create-grid { margin-top: 0; }
+.experiment-catalog-note { margin-top: 10px; }
+
+.experiment-results-summary {
+  min-width: 0;
+  padding-top: 15px;
+  border-top: 1px solid #e9ede8;
+}
+.experiment-results-heading { align-items: center; }
+.experiment-results-heading h3 { font-size: 15px; }
+.experiment-results-heading .experiment-result-count { font-size: 12px; }
+.experiment-results-summary > .experiment-helper { margin-top: 7px; }
+.experiment-results-summary .wave-progress { margin-top: 11px; }
+.experiment-results-summary .wave-progress small { color: #68756a; font-size: 12px; }
+.experiment-results-summary .decision-card { margin-top: 12px; }
+.experiment-detail-disclosure { margin-top: 0; }
+.experiment-detail-disclosure .segment-table-wrap { margin-top: 0; }
+.experiment-detail-disclosure .segment-table { min-width: 880px; }
+.experiment-wave .wave-heading p, .experiment-headline-list li p { font-size: 15px; }
+.experiment-disclosure > summary { font-size: 15px; min-height: 48px; }
+.experiment-disclosure > summary small, .experiment-copy-note, .experiment-helper, .experiment-catalog-note,
+.experiment-audience-count, .experiment-result-count, .experiment-wave .wave-visual-note,
+.experiment-results-summary .wave-progress small { font-size: 14px; }
+.experiment-review-detail { margin-top: 12px; font-size: 14px; line-height: 1.6; }
+.experiment-review-detail > summary { cursor: pointer; font-weight: 600; }
+.experiment-review-detail li { margin-top: 6px; overflow-wrap: anywhere; }
+
+@media (max-width: 640px) {
+  .experiment-wave .wave-heading { flex-direction: column; gap: 10px; }
+  .experiment-brief { padding: 12px; }
+  .experiment-brief-heading { flex-direction: column; }
+  .experiment-audience-count { text-align: left; }
+  .experiment-run-row { align-items: flex-start; flex-direction: column; }
+  .experiment-run-row .wave-actions, .experiment-run-row .wave-actions .button { width: 100%; }
+  .experiment-settings-grid { grid-template-columns: 1fr; }
+  .experiment-disclosure > summary { align-items: flex-start; flex-wrap: wrap; }
+  .experiment-disclosure > summary small { margin-left: 0; text-align: left; }
+  .experiment-disclosure > summary::after { margin-left: auto; }
+  .experiment-results-heading { align-items: flex-start; flex-direction: column; }
+  .experiment-results-heading .experiment-result-count { text-align: left; }
+}

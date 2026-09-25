@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import App from '../src/App.js';
 import { emptyMetricsSnapshot, type Campaign, type IntegrationStatus } from '../shared/types.js';
@@ -28,6 +28,7 @@ function installApi(options: {
   rejectCreate?: boolean;
   integrations?: IntegrationStatus[];
   campaigns?: Campaign[];
+  runResponse?: () => Promise<Response>;
   creativeResponses?: Record<string, {
     imagePromptSuggestion: string;
     jobs: unknown[];
@@ -51,7 +52,7 @@ function installApi(options: {
       return jsonResponse({ error: { code: 'validation_error', message: 'Campaign details are invalid.' } }, 400);
     }
     if (method === 'POST' && url === '/api/campaigns') return jsonResponse({ campaign });
-    if (method === 'POST' && /^\/api\/campaigns\/[^/]+\/run$/.test(url)) return jsonResponse({ wave: emptyWaveSnapshot() });
+    if (method === 'POST' && /^\/api\/campaigns\/[^/]+\/run$/.test(url)) return options.runResponse ? options.runResponse() : jsonResponse({ wave: emptyWaveSnapshot() });
     if (url === '/api/campaigns') return jsonResponse({ campaigns: options.campaigns ?? [] });
     if (url === '/api/integrations') return jsonResponse({ integrations: options.integrations ?? [] });
     const creativeCampaign = campaigns.find((item) => url === `/api/campaigns/${item.id}/creative`);
@@ -90,6 +91,25 @@ afterEach(() => {
 });
 
 describe('Riff dashboard', () => {
+  it('ignores a previous campaign’s pending wave response after switching campaigns', async () => {
+    let finishRun!: (response: Response) => void;
+    const first = fixtureCampaign({ headlines: ['First saved headline', 'Second saved headline'] });
+    const second = fixtureCampaign({ id: 'campaign-2', name: 'Other campaign', headlines: ['Other headline A', 'Other headline B'] });
+    const { calls } = installApi({ campaigns: [first, second], runResponse: () => new Promise((resolve) => { finishRun = resolve; }) });
+    const user = userEvent.setup();
+    render(<App />);
+    await screen.findByRole('button', { name: 'Generate 2 images' });
+    await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
+    await user.click(screen.getByRole('button', { name: 'Start wave' }));
+    await waitFor(() => expect(calls.some((call) => call.url.endsWith('/run'))).toBe(true));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Choose campaign' }), second.id);
+    await waitFor(() => expect(calls.some((call) => call.url === '/api/campaigns/campaign-2')).toBe(true));
+    await act(async () => finishRun(jsonResponse({ wave: { ...emptyWaveSnapshot(), experimentId: 'old-campaign-wave', headlines: first.headlines, progress: { total: 8, succeeded: 8, failed: 0, pending: 0, running: 0 } } })));
+    expect(screen.getByText('No wave run yet')).toBeTruthy();
+    expect(screen.queryByText('8 of 8 agents complete')).toBeNull();
+    expect(screen.getByText(second.headlines[0])).toBeTruthy();
+  });
+
   it('keeps the results-first empty dashboard and makes no campaign or provider actions automatically', async () => {
     const { calls } = installApi();
     render(<App />);
@@ -97,7 +117,7 @@ describe('Riff dashboard', () => {
     expect(await screen.findByRole('heading', { name: 'Start with a campaign brief.' })).toBeTruthy();
     expect(screen.getByRole('region', { name: 'Campaign metrics' })).toBeTruthy();
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
-    expect(screen.getByText('No trend data yet')).toBeTruthy();
+    expect(screen.getByText('No wave results yet')).toBeTruthy();
     expect(screen.getByText('No campaign content yet')).toBeTruthy();
     await waitFor(() => expect(calls.some((call) => call.url === '/api/integrations')).toBe(true));
     expect(calls.every((call) => call.method === 'GET')).toBe(true);
@@ -225,14 +245,18 @@ describe('Riff dashboard', () => {
     expect(calls.some((call) => call.method === 'POST' && call.url.endsWith('/creative/images'))).toBe(false);
 
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
-    expect(await screen.findByText(`Judging: ${imageHeadlines.join(' · ')}`)).toBeTruthy();
+    expect(within(await screen.findByRole('list', { name: 'Headlines for the next wave' })).getByText(imageHeadlines[0])).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.getByText(/plus 1 custom on this draft/)).toBeTruthy();
+    expect(screen.getByText('1 saved on this campaign')).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Campaign', exact: true }));
-    await user.click(screen.getByText('Saved creative drafts', { exact: true }));
+    await user.click(screen.getByText('Versions', { exact: true }));
+    await user.clear(screen.getByRole('textbox', { name: 'Version A headline' }));
+    await user.type(screen.getByRole('textbox', { name: 'Version A headline' }), 'A different unsaved caption');
     await user.click(screen.getByRole('button', { name: 'Select for experiment' }));
-    expect(await screen.findByText(/Saved creative attached/)).toBeTruthy();
+    expect(await screen.findByText(/A saved creative is selected for the next wave/)).toBeTruthy();
+    expect(within(screen.getByRole('list', { name: 'Headlines for the next wave' })).getByText(imageHeadlines[0])).toBeTruthy();
+    expect(screen.queryByText('A different unsaved caption')).toBeNull();
     await user.click(screen.getByRole('button', { name: 'Start wave' }));
     await waitFor(() => expect(calls.some((call) => call.method === 'POST' && call.url === '/api/campaigns/campaign-1/run')).toBe(true));
     expect(calls.find((call) => call.method === 'POST' && call.url === '/api/campaigns/campaign-1/run')?.body).toMatchObject({
@@ -246,14 +270,14 @@ describe('Riff dashboard', () => {
     await user.clear(screen.getByRole('textbox', { name: 'Version A headline' }));
     await user.type(screen.getByRole('textbox', { name: 'Version A headline' }), editedHeadline);
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
-    expect(await screen.findByText(`Judging: ${editedHeadline} · ${imageHeadlines[1]}`)).toBeTruthy();
+    expect(within(await screen.findByRole('list', { name: 'Headlines for the next wave' })).getByText(editedHeadline)).toBeTruthy();
 
     await user.click(screen.getByRole('button', { name: 'Campaign', exact: true }));
     await user.click(screen.getByText('Versions', { exact: true }));
     expect((screen.getByRole('textbox', { name: 'Version A headline' }) as HTMLInputElement).value).toBe(editedHeadline);
     await user.clear(screen.getByRole('textbox', { name: 'Version B headline' }));
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
-    expect(await screen.findByText('Add 2–3 unique, non-empty headlines in Campaign before starting.')).toBeTruthy();
+    expect(await screen.findByText('Add 2–3 unique, non-empty headlines of up to 60 characters in Campaign before starting.')).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(true);
 
     await user.selectOptions(screen.getByRole('combobox', { name: 'Choose campaign' }), campaignTwo.id);
@@ -264,7 +288,7 @@ describe('Riff dashboard', () => {
     expect((screen.getByRole('textbox', { name: 'Version B headline' }) as HTMLInputElement).value).toBe(videoHeadlines[1]);
     expect(secondCampaignHeadline.value).not.toBe(editedHeadline);
     await user.click(screen.getByRole('button', { name: 'Experiments', exact: true }));
-    expect(await screen.findByText(`Judging: ${videoHeadlines.join(' · ')}`)).toBeTruthy();
+    expect(within(await screen.findByRole('list', { name: 'Headlines for the next wave' })).getByText(videoHeadlines[0])).toBeTruthy();
     expect((screen.getByRole('button', { name: 'Start wave' }) as HTMLButtonElement).disabled).toBe(false);
   });
 });

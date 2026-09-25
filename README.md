@@ -4,9 +4,9 @@ Riff is a local campaign experiment workspace. It saves campaign briefs, creates
 
 Riff is intended for local, single-user use. The server binds to loopback and has no authentication for public hosting.
 
-## Example campaign image
+## Example finished image ads
 
-[View the generated image draft](artifacts/image-campaign/quiet-pages.jpg). It comes from a fictional campaign and contains unwanted lettering, so review it before use.
+Three fictional product scenarios, with BFL photography and locally rendered headline/CTA layouts: [notebook](artifacts/image-campaign/notebook-ad.png), [bottle](artifacts/image-campaign/bottle-ad.png), and [mug](artifacts/image-campaign/mug-ad.png). Each PNG is 1080 × 1350. These are visual quality samples, not performance-tested ads.
 
 ## Current phase
 
@@ -14,19 +14,26 @@ Implemented:
 
 - Results-first dashboard with campaign selection, metric details, experiments, lessons, and provider configuration status.
 - Campaign drafts persisted in SQLite. Saving a draft does not start traffic or creative generation.
-- Creative composer with editable Liquid headline suggestions, manual-copy fallback, and a separate visual direction for each of 2–3 versions. Generating a batch makes one paid BFL request per version, sequentially. Existing drafts that share one asset remain available. The Versions editor and saved drafts start collapsed; default image directions share a professional studio art direction with distinct framing per version.
+- Creative composer with editable Liquid headline suggestions, manual-copy fallback, and a separate visual direction for each of 2–3 versions. Generating a batch makes one paid BFL request per version, sequentially. Existing drafts that share one asset remain available. The Versions editor and saved drafts start collapsed; image defaults use coordinated hero, editorial-setting, and graphic compositions, with explicit physical staging for notebooks and vessels.
+- The newest creative batch is previewed directly below generation controls, including in-progress and partial results. Each completed image can be inspected or exported without expanding Versions. Older batches stay in a collapsed archive; loading saved previews does not start generation.
+- Finished image ads combine the complete photo, saved headline, and **Join the waitlist** call-to-action in a 1080 × 1350 portrait layout. Inspect and download the finished PNG, or open the original photo separately. Typography is rendered locally rather than generated into the photograph; composing or exporting an existing image makes no paid request and does not change its saved caption or source asset.
 - Video generation is enabled with `BFL_VIDEO_ENABLED=true`. Controls include duration, aspect ratio, HD/Full HD resolution, audio, and draft quality; draft quality requires HD. It is disabled by default.
 - Each saved variant has a **View image** or **Watch video** action. The focused viewer shows the complete image or a video with playback controls; **Open original** opens the locally saved asset in its own tab. Viewing saved media does not call a generation provider.
+- Expanded previews have previous/next arrows, a version counter, and keyboard arrow navigation within the opened batch. Finished ads stay in their finished layout; unavailable versions are skipped. Video navigation pauses the previous clip and does not autoplay the next one.
 - Experiment setup on the Experiments tab: filter persona profiles, add custom personas, choose agent count and concurrency, then explicitly start, pause, or resume a wave. Select a completed creative batch with **Select for experiment** to associate its assets with the matching headlines; without a selected batch, the wave uses text only.
+- Experiments separates the next-wave brief, audience and run controls from recorded results. Optional audience filters, advanced controls and older experiments are collapsed. Result cards use the captions and media saved with that experiment, and only the latest wave receives current metrics. Text-only snapshots are labeled explicitly; generating images later does not attach them retrospectively. Selecting a saved creative adopts its saved headlines for the next wave.
 - Simulated responses, progress, decisions, and lessons are saved locally; configured analytics adapters ingest and summarize simulated events. These are model-generated responses, not measurements from real customers.
 - Server-side adapter foundations for Liquid AI, RawTree, classic Tinybird, and Black Forest Labs.
 - Empty analytics shown as not started; rates and costs without outcomes shown as “—”.
+- The sign-up graph shows cumulative **simulated** outcomes from the latest persona wave. Its horizontal axis is elapsed time and its vertical axis is sign-up count. Steps represent recorded outcomes; the legend identifies each headline, including versions with zero sign-ups. The source is local persona judgments; analytics providers are export destinations.
 
 Opening the app and saving a draft do not contact providers. Headline suggestions call Liquid; generating media uses BFL credits; starting or resuming a wave runs Liquid persona requests and sends analytics events. Integration status reports local configuration; it does not verify provider connectivity.
 
 The current persona judge receives text only. It can assess supplied copy and product facts, but it cannot inspect generated image pixels or watch videos. Distinct visuals are preserved for human review; simulated results do not establish visual effectiveness or isolate the effect of a headline when complete concepts differ.
 
 Creative batches persist each version's progress. If a request fails or has an unknown outcome, remaining versions stop and successful outputs stay viewable. Reloading progress does not submit another paid request, and interrupted requests are never automatically resubmitted.
+
+New headlines are limited to 60 characters, including spaces and punctuation. The editor and API count Unicode code points consistently and reject over-limit copy instead of cutting words. Older saved captions remain viewable; shorten an over-limit draft before generating a new creative or starting a new experiment. Liquid is prompted for finished ad copy, with explanations kept separate.
 
 ## Run locally
 
@@ -82,6 +89,10 @@ Event spend uses integer cents. Events carry stable IDs, and metric queries dedu
 ### Black Forest Labs
 
 Set `BFL_API_KEY`; `BFL_MODEL` selects the image endpoint. The [BFL generation guide](https://docs.bfl.ai/quick_start/generating_images) describes submission, status checks, and result delivery. Image generation is available only through the reviewed creative composer action and uses BFL credits; returned image assets are saved locally for later review. FLUX.2 Pro requests disable prompt upsampling so the reviewed direction is passed without that expansion; other configured endpoints retain their supported request fields.
+
+Image defaults follow BFL's [FLUX.2 prompting guidance](https://docs.bfl.ai/guides/prompting_guide_flux2): the supplied product and its physical pose come before composition, photographic style, and lighting. Custom directions remain editable and saved media is never silently regenerated. Text-only briefs cannot guarantee exact manufactured-product fidelity; inspect geometry and details before using an export.
+
+To review the three fictional notebook, bottle, and mug scenarios without making requests, run `node --import tsx scripts/image-quality-scenarios.ts`. Add `--live` to generate up to three images using the configured BFL model, or `--scenario=notebook-hero` (also `bottle-editorial` and `mug-flatlay`) to select individual cases. Live runs retain prompts, provider task IDs and original images under `.data/image-quality/`, stop on failure or uncertainty, and never automatically regenerate. They do not modify campaigns or run a simulation.
 
 Video generation uses `BFL_VIDEO_MODEL=flux-3-video` and is gated by `BFL_VIDEO_ENABLED`, which defaults to `false`. Set it to `true` and restart the server to enable the Video selector. The [FLUX 3 API reference](https://docs.bfl.ai/api-reference/utility/generate-a-video-with-flux-3) documents the text-to-video contract. Riff starts with a five-second HD draft and audio off. Both image and video batches make one request per reviewed version; the button shows the count before submission. Generated concepts remain drafts and are not published ads.
 

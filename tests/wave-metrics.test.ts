@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentJob } from '../shared/run.js';
-import { deciderSpeed, lastJobError, segmentMetrics, totalsFromJobs } from '../server/wave-metrics.js';
+import { deciderSpeed, lastJobError, latestJudgmentAt, segmentMetrics, totalsFromJobs } from '../server/wave-metrics.js';
 
 function job(overrides: Partial<AgentJob> = {}): AgentJob {
   return {
@@ -35,6 +35,16 @@ function job(overrides: Partial<AgentJob> = {}): AgentJob {
 }
 
 describe('wave metrics', () => {
+  it('reports the newest completed judgment even when jobs finish out of queue order', () => {
+    expect(latestJudgmentAt([
+      job({ finishedAt: '2026-09-25T18:00:09.000Z' }),
+      job({ finishedAt: '2026-09-25T18:00:02.000Z' }),
+      job({ status: 'failed', finishedAt: '2026-09-25T18:00:20.000Z' }),
+      job({ finishedAt: 'invalid' }),
+    ])).toBe('2026-09-25T18:00:09.000Z');
+    expect(latestJudgmentAt([job({ status: 'pending', finishedAt: null })])).toBeNull();
+  });
+
   it('rolls up action mix, dwell, scores, and notice-first without imputing failed jobs', () => {
     const jobs = [
       job({ id: '11111111-1111-4111-8111-111111111111', action: 'signup', elapsedMs: 80, dwellSeconds: 12 }),
